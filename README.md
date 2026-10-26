@@ -28,8 +28,6 @@ Run as root on the server:
 curl -fsSL https://raw.githubusercontent.com/thejohnd0e/hysteria-vps-kit/master/install.sh | bash -s -- --first-client one_us
 ```
 
-(While the repository is private, clone it instead: `git clone https://github.com/thejohnd0e/hysteria-vps-kit.git /opt/hysteria-vps-kit-src && bash /opt/hysteria-vps-kit-src/install.sh ...`.)
-
 The script puts the kit in `/opt/hysteria-vps-kit-src`, downloads the pinned Hysteria2 core, **verifies its
 SHA-256**, creates a system user, a self-signed certificate (10 years), the state in
 `/etc/hysteria-vps-kit/` and the service `hysteria-vps-kit`, and prints the first client's URI and QR code.
