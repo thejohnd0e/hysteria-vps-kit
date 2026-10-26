@@ -50,6 +50,7 @@ suite_install() {
     check 'config.yaml written' test -s "$sandbox/etc/hysteria-vps-kit/config.yaml"
     check 'certificate written' test -s "$sandbox/etc/hysteria-vps-kit/server.crt"
     check 'command link created' test -L "$sandbox/usr/local/bin/hy2-client"
+    check 'UDP buffer sysctl written' contains "$sandbox/etc/sysctl.d/99-hysteria-vps-kit.conf" 'net.core.rmem_max = 7500000'
     rm -rf "$sandbox"
     new_root
     check 'install without obfs' install_sandbox --no-obfs --no-first-client
@@ -111,6 +112,7 @@ suite_uninstall() {
     check 'state kept' test -f "$sandbox/etc/hysteria-vps-kit/state.json"
     refuse 'core removed' test -e "$sandbox/opt/hysteria-vps-kit"
     refuse 'command link removed' test -e "$sandbox/usr/local/bin/hy2-client"
+    refuse 'sysctl file removed' test -e "$sandbox/etc/sysctl.d/99-hysteria-vps-kit.conf"
     check 'full uninstall' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --yes
     refuse 'config dir removed' test -e "$sandbox/etc/hysteria-vps-kit"
     refuse 'uninstall twice' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --yes

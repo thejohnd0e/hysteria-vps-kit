@@ -154,6 +154,7 @@ if (( create_client )); then
     hvk_state_update '.clients[$n] = $p' --arg n "$first_client" --arg p "$(hvk_rand 28)"
 fi
 hvk_render_config
+[[ $no_service == 0 ]] || hvk_ensure_sysctl || true
 
 # --- command link, unit, firewall ---
 chmod +x "$project/hy2-client" "$project/update.sh" "$project/uninstall.sh"
@@ -184,6 +185,7 @@ EOF
         hvk_state_update '.firewall = "ufw"'
         hvk_log "ufw: opened $port/udp"
     fi
+    hvk_ensure_sysctl || true
     systemctl daemon-reload
     systemctl enable --now "$HVK_SERVICE" > /dev/null 2>&1
     sleep 2

@@ -38,6 +38,7 @@ if [[ -z $HVK_ROOT ]]; then
     fi
 fi
 rm -rf "$HVK_OPT"
+rm -f "$HVK_SYSCTL"
 # remove the command link only if it is ours
 if [[ -L $HVK_LINK && $(readlink -- "$HVK_LINK") == */hy2-client ]]; then rm -f "$HVK_LINK"; fi
 if (( keep )); then

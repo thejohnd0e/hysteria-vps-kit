@@ -90,6 +90,7 @@ obfuscation password and port are kept.
 | `/etc/hysteria-vps-kit/config.yaml` | rendered server config; edit `state.json` and run `hy2-client add`/`remove`, not this file |
 | `/etc/hysteria-vps-kit/server.{crt,key}` | self-signed certificate |
 | `/opt/hysteria-vps-kit/hysteria` | pinned core binary |
+| `/etc/sysctl.d/99-hysteria-vps-kit.conf` | raises `net.core.rmem_max`/`wmem_max` to 7.5 MB: with the 208 KB default the kernel dropped QUIC packets under load (seen as stalls with two devices streaming) |
 | `/etc/systemd/system/hysteria-vps-kit.service` | the unit (sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`) |
 
 ## Tests

@@ -59,6 +59,7 @@ if [[ $old_core != "$HVK_CORE_VERSION" ]]; then
     install -m 755 "$tmp/hysteria" "$HVK_CORE_BIN"
 fi
 
+hvk_ensure_sysctl || true
 hvk_state_update '.version = $v | .core = $c' --arg v "$new_kit" --arg c "$HVK_CORE_VERSION"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
 hvk_render_config

@@ -144,3 +144,17 @@ hvk_udp_port_busy() { # 0 = a UDP socket already listens on the port
     command -v ss > /dev/null 2>&1 || return 1
     ss -lnuH 2> /dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"
 }
+
+HVK_SYSCTL=$HVK_ROOT/etc/sysctl.d/99-hysteria-vps-kit.conf
+
+# Hysteria2 (quic-go) asks for about 7 MB UDP buffers; the kernel default (208 KB) drops packets under
+# load and shows up as stalls. Returns 0 if the file was written or changed, 1 if it was already right.
+hvk_ensure_sysctl() {
+    local want
+    want=$'# hysteria-vps-kit: UDP buffers for QUIC\nnet.core.rmem_max = 7500000\nnet.core.wmem_max = 7500000\n'
+    if [[ -f $HVK_SYSCTL && $(cat "$HVK_SYSCTL") == "${want%$'\n'}" ]]; then return 1; fi
+    install -d -m 755 "$(dirname "$HVK_SYSCTL")"
+    printf '%s' "$want" > "$HVK_SYSCTL"
+    if [[ -z $HVK_ROOT ]]; then sysctl -q -p "$HVK_SYSCTL" > /dev/null 2>&1 || hvk_log 'warning: could not apply the UDP buffer sysctl'; fi
+    return 0
+}
