@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016  # jq filters are meant to stay in single quotes
+set -euo pipefail
+# hy2-client: manage Hysteria2 identities of a hysteria-vps-kit server.
+self=$(readlink -f -- "${BASH_SOURCE[0]}")
+project=$(dirname -- "$self")
+# shellcheck source=lib/common.sh
+source "$project/lib/common.sh"
+
+usage() {
+    cat << 'EOF'
+Usage: hy2-client <command> [arguments]
+
+  add NAME            create an identity (own password) and print its URI
+  remove NAME         delete an identity
+  list                list identities
+  show NAME [--yaml [--http ADDR] [--socks ADDR] | --qr]
+                      print the hysteria2:// URI (default), a client.yaml for the
+                      Hysteria2 client / proxy container, or a QR code
+  version             kit and core versions
+  help                this text
+
+Adding or removing an identity restarts the service (Hysteria2 has no hot reload).
+Connected clients notice after the QUIC idle timeout and reconnect on their own:
+measured about 30 seconds of interruption.
+EOF
+}
+
+cmd=${1:-help}
+[[ $# -eq 0 ]] || shift
+case $cmd in
+    help|-h|--help) usage ;;
+    version)
+        hvk_require_state
+        printf 'hysteria-vps-kit %s, Hysteria2 core %s\n' "$(hvk_project_version "$project")" "$(hvk_state_get .core)"
+        ;;
+    list)
+        hvk_require_state
+        jq -r '.clients | keys[]' "$HVK_STATE"
+        ;;
+    add)
+        hvk_require_root; hvk_require_state
+        name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
+        hvk_valid_name "$name" || hvk_die "invalid name: $name (letters, digits, _ . @ -, up to 32, start with a letter or digit)"
+        [[ $(jq -r --arg n "$name" '.clients | has($n)' "$HVK_STATE") == false ]] || hvk_die "client already exists: $name"
+        hvk_state_update '.clients[$n] = $p' --arg n "$name" --arg p "$(hvk_rand 28)"
+        hvk_render_config
+        hvk_restart_service
+        printf 'Client %s\nURI:\n' "$name"
+        hvk_client_uri "$name"
+        ;;
+    remove)
+        hvk_require_root; hvk_require_state
+        name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
+        [[ $(jq -r --arg n "$name" '.clients | has($n)' "$HVK_STATE") == true ]] || hvk_die "no such client: $name"
+        hvk_state_update 'del(.clients[$n])' --arg n "$name"
+        hvk_render_config
+        hvk_restart_service
+        hvk_log "removed $name"
+        ;;
+    show)
+        hvk_require_state
+        name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
+        shift
+        mode=uri http=127.0.0.1:8080 socks=127.0.0.1:1080
+        while (( $# )); do
+            case $1 in
+                --yaml) mode=yaml; shift ;;
+                --qr) mode=qr; shift ;;
+                --http) http=${2:?--http needs a value}; shift 2 ;;
+                --socks) socks=${2:?--socks needs a value}; shift 2 ;;
+                *) hvk_die "unknown option: $1" ;;
+            esac
+        done
+        case $mode in
+            uri) hvk_client_uri "$name" ;;
+            yaml) hvk_client_yaml "$name" "$http" "$socks" ;;
+            qr)
+                command -v qrencode > /dev/null || hvk_die 'qrencode is not installed'
+                hvk_client_uri "$name" | qrencode -t ANSIUTF8
+                ;;
+        esac
+        ;;
+    *) usage >&2; exit 2 ;;
+esac

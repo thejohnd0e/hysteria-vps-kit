@@ -1,0 +1,6 @@
+# Local secrets and test leftovers
+.env
+*.key
+*.crt
+/tmp/
+/.sandbox/
