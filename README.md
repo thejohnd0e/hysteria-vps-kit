@@ -66,6 +66,8 @@ The URI looks like
 `insecure=1` only turns off chain validation of the self-signed certificate; the client still checks the
 **pinned SHA-256 fingerprint**, so a different certificate is rejected.
 
+**Run the same sysctl on the machine that runs the client** (`net.core.rmem_max = 7500000`, `net.core.wmem_max = 7500000`): the download stream lands there, and with the 208 KB default the kernel drops QUIC packets (seen as stalls under load).
+
 To turn an identity into a local HTTP/SOCKS5 proxy (for a router or a LAN), run the Hysteria2 client with the
 `--yaml` output: `hysteria client -c client.yaml`. A container is as good as a service; use host networking if
 the Docker bridge drops the QUIC handshake.
