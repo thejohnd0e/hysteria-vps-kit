@@ -156,6 +156,7 @@ fi
 hvk_render_config
 
 # --- command link, unit, firewall ---
+chmod +x "$project/hy2-client" "$project/update.sh" "$project/uninstall.sh"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
 if [[ $no_service == 0 ]]; then
     cat > "$HVK_UNIT" << EOF

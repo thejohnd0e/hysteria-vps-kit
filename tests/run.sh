@@ -34,6 +34,7 @@ suite_validation() {
     refuse '--no-service without --root' bash "$project/install.sh" --no-service
     refuse 'unknown option' bash "$project/install.sh" --nope
     check 'help works' bash "$project/install.sh" --help
+    for f in install.sh update.sh uninstall.sh hy2-client; do check "$f is executable" test -x "$project/$f"; done
     rm -rf "$sandbox"
 }
 
