@@ -1,4 +1,4 @@
-# Hysteria VPS Kit
+# Hysteria Vps Kit
 
 Hysteria2 (QUIC over UDP, Salamander obfuscation) server installer and the `hy2-client` command to
 manage identities. A small sibling of [xray-vps-kit](https://github.com/thejohnd0e/xray-vps-kit) and
