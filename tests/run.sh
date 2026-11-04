@@ -284,7 +284,50 @@ suite_uninstall() {
     rm -rf "$sandbox"
 }
 
-suites=(validation install render clients locking repair update uninstall)
+suite_doctor() {
+    printf 'suite: doctor\n'
+    new_root
+    install_sandbox --first-client main-user > /dev/null
+    check 'doctor succeeds on a healthy sandbox' hy doctor
+    check 'doctor reports no failures' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -c '^\\[FAIL\\]' | grep -qx 0"
+    check 'doctor skips system checks in sandbox' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -q '^\\[SKIP\\] service'"
+    local secret
+    secret=$(jq -r '.clients["main-user"]' "$sandbox/etc/hysteria-vps-kit/state.json")
+    refuse 'doctor does not print secrets' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -q '$secret'"
+
+    # Defect tests
+    # 1. missing key
+    local key_file="$sandbox/etc/hysteria-vps-kit/server.key"
+    local key_bak="$sandbox/etc/hysteria-vps-kit/server.key.bak"
+    mv "$key_file" "$key_bak"
+    refuse 'doctor fails without the key' hy doctor
+    check 'doctor names the key problem' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -q 'certificate/key'"
+    mv "$key_bak" "$key_file"
+
+    # 2. modified pin in state
+    local state_file="$sandbox/etc/hysteria-vps-kit/state.json"
+    local orig_pin
+    orig_pin=$(jq -r .pin "$state_file")
+    jq '.pin = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+    refuse 'doctor fails on mismatched pin' hy doctor
+    jq --arg p "$orig_pin" '.pin = $p' "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+
+    # 3. modified config.yaml (extra line)
+    local cfg_file="$sandbox/etc/hysteria-vps-kit/config.yaml"
+    echo "# tampering" >> "$cfg_file"
+    refuse 'doctor fails on altered config.yaml' hy doctor
+    sed -i '/# tampering/d' "$cfg_file"
+    check 'doctor succeeds after restoring config.yaml' hy doctor
+
+    # 4. 0 clients in state -> WARN and exit code 0
+    jq '.clients = {}' "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+    HVK_ROOT=$sandbox bash -c "source '$project/lib/common.sh'; hvk_render_config"
+    check 'doctor succeeds with 0 clients (warn only)' hy doctor
+    check 'doctor reports warning for 0 clients' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -q '^\\[WARN\\] clients: 0 configured'"
+    rm -rf "$sandbox"
+}
+
+suites=(validation install render clients locking repair update uninstall doctor)
 if [[ ${1:-} == --suite ]]; then suites=("${2:?--suite needs a name}"); fi
 for suite in "${suites[@]}"; do
     declare -F "suite_$suite" > /dev/null || { printf 'error: unknown suite: %s\n' "$suite" >&2; exit 2; }

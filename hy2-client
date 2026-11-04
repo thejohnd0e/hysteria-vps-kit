@@ -17,6 +17,7 @@ Usage: hy2-client <command> [arguments]
   show NAME [--yaml [--http ADDR] [--socks ADDR] | --qr]
                       print the hysteria2:// URI (default), a client.yaml for the
                       Hysteria2 client / proxy container, or a QR code
+  doctor              read-only diagnostics on configuration, certificates, unit, and service
   version             kit and core versions
   help                this text
 
@@ -26,10 +27,246 @@ measured about 30 seconds of interruption.
 EOF
 }
 
+doctor() {
+    local ok_count=0 warn_count=0 fail_count=0 skip_count=0
+    report_ok() { ok_count=$((ok_count + 1)); printf '[ OK ] %s\n' "$1"; }
+    report_warn() { warn_count=$((warn_count + 1)); printf '[WARN] %s\n' "$1"; }
+    report_fail() { fail_count=$((fail_count + 1)); printf '[FAIL] %s\n' "$1"; }
+    report_skip() { skip_count=$((skip_count + 1)); printf '[SKIP] %s\n' "$1"; }
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d "${HVK_ROOT:-}/tmp/hvk-doctor.XXXXXX" 2>/dev/null || mktemp -d "/tmp/hvk-doctor.XXXXXX")
+    cleanup_doctor() { rm -rf "$tmp_dir"; }
+    trap cleanup_doctor EXIT
+
+    # 1. state.json reads and passes validation
+    local state_valid=0 state_err=""
+    if [[ ! -f $HVK_STATE ]]; then
+        report_fail "state.json: file is missing ($HVK_STATE)"
+    elif ! jq empty "$HVK_STATE" >/dev/null 2>&1; then
+        report_fail "state.json: invalid JSON syntax"
+    elif ! state_err=$(hvk_validate_state 2>&1); then
+        report_fail "state.json: ${state_err#*error: }"
+    else
+        state_valid=1
+        local st_status
+        st_status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "unknown")
+        if [[ $st_status != "ready" ]]; then
+            report_warn "state.json is valid but status is '$st_status'"
+        else
+            report_ok "state.json is valid (status: $st_status)"
+        fi
+    fi
+
+    local port core_expected sni obfs_enabled obfs_password endpoint
+    if (( state_valid )); then
+        port=$(hvk_state_get .port)
+        core_expected=$(hvk_state_get .core)
+        sni=$(hvk_state_get .sni)
+        obfs_enabled=$(hvk_state_get .obfs.enabled)
+        obfs_password=$(hvk_state_get .obfs.password)
+        endpoint=$(hvk_state_get .endpoint)
+    else
+        port="" core_expected="$HVK_CORE_VERSION" sni="" obfs_enabled="false" obfs_password="" endpoint=""
+    fi
+
+    # 2. core: file executable, version executes, version contains state.core
+    if [[ ! -f $HVK_CORE_BIN ]]; then
+        report_fail "core binary: file missing ($HVK_CORE_BIN)"
+    elif [[ ! -x $HVK_CORE_BIN ]]; then
+        report_fail "core binary: file not executable ($HVK_CORE_BIN)"
+    else
+        local core_out
+        core_out=$("$HVK_CORE_BIN" version 2>&1 || true)
+        if [[ -n $core_expected && $core_out == *"$core_expected"* ]]; then
+            report_ok "core binary is executable and matches expected version ($core_expected)"
+        else
+            report_fail "core binary: execution failed or version mismatch (expected $core_expected)"
+        fi
+    fi
+
+    # 3. unit exists, ExecStart contains HVK_CORE_BIN and HVK_CONFIG
+    if [[ ! -f $HVK_UNIT ]]; then
+        report_fail "systemd unit: file missing ($HVK_UNIT)"
+    else
+        local exec_line
+        exec_line=$(grep '^ExecStart=' "$HVK_UNIT" 2>/dev/null || true)
+        if [[ $exec_line == *"${HVK_CORE_BIN#"$HVK_ROOT"}"* || $exec_line == *"$HVK_CORE_BIN"* ]] && \
+           [[ $exec_line == *"${HVK_CONFIG#"$HVK_ROOT"}"* || $exec_line == *"$HVK_CONFIG"* ]]; then
+            report_ok "systemd unit exists and references core binary and config"
+        else
+            report_fail "systemd unit: ExecStart does not reference core binary and config"
+        fi
+    fi
+
+    # 4. service is-active and is-enabled
+    if [[ -n $HVK_ROOT ]]; then
+        report_skip "service status (sandbox mode)"
+    else
+        local is_act is_enb
+        is_act=$(systemctl is-active "$HVK_SERVICE" 2>/dev/null || echo "inactive")
+        is_enb=$(systemctl is-enabled "$HVK_SERVICE" 2>/dev/null || echo "disabled")
+        if [[ $is_act == "active" && $is_enb == "enabled" ]]; then
+            report_ok "service is active and enabled"
+        else
+            report_fail "service status: active=$is_act, enabled=$is_enb"
+        fi
+    fi
+
+    # 5. config.yaml exists; render matches file; permissions 640
+    if [[ ! -f $HVK_CONFIG ]]; then
+        report_fail "config.yaml does not exist ($HVK_CONFIG)"
+    elif (( ! state_valid )); then
+        report_fail "config.yaml cannot be verified because state.json is invalid"
+    else
+        local tmp_rendered="$tmp_dir/config.yaml.rendered"
+        if hvk_render_config_to "$tmp_rendered" 2>/dev/null && cmp -s "$tmp_rendered" "$HVK_CONFIG"; then
+            local cfg_mode
+            cfg_mode=$(stat -c '%a' "$HVK_CONFIG" 2>/dev/null || echo "unknown")
+            if [[ $cfg_mode == "640" ]]; then
+                report_ok "config.yaml matches state and has mode 640"
+            else
+                report_warn "config.yaml matches state but permissions are $cfg_mode (expected 640)"
+            fi
+        else
+            report_fail "config.yaml does not match rendered state"
+        fi
+    fi
+
+    # 6. cert and key exist; key matches cert; pin in state matches
+    if [[ ! -f $HVK_CERT ]]; then
+        report_fail "certificate/key: certificate file missing ($HVK_CERT)"
+    elif [[ ! -f $HVK_KEY ]]; then
+        report_fail "certificate/key: private key file missing ($HVK_KEY)"
+    else
+        local cert_pub key_pub
+        cert_pub=$(openssl x509 -in "$HVK_CERT" -pubkey -noout 2>/dev/null || true)
+        key_pub=$(openssl pkey -in "$HVK_KEY" -pubout 2>/dev/null || true)
+        if [[ -z $cert_pub || -z $key_pub || "$cert_pub" != "$key_pub" ]]; then
+            report_fail "certificate/key: private key does not match certificate"
+        else
+            local actual_pin state_pin
+            actual_pin=$(hvk_pin "$HVK_CERT" 2>/dev/null || true)
+            state_pin=$(jq -r '.pin // empty' "$HVK_STATE" 2>/dev/null || true)
+            if [[ -z $state_pin || "$actual_pin" != "$state_pin" ]]; then
+                report_fail "certificate/key: certificate pin does not match state.json"
+            else
+                report_ok "certificate/key pair matches and pin is consistent"
+            fi
+        fi
+    fi
+
+    # 7. obfs: if enabled, password non-empty and block exists in config
+    if [[ $obfs_enabled == "true" ]]; then
+        if [[ -z $obfs_password ]]; then
+            report_fail "obfuscation: enabled in state but password is empty"
+        elif [[ ! -f $HVK_CONFIG ]] || ! grep -q 'type: salamander' "$HVK_CONFIG" 2>/dev/null; then
+            report_fail "obfuscation: enabled in state but missing in config.yaml"
+        else
+            report_ok "obfuscation: enabled (salamander)"
+        fi
+    else
+        report_ok "obfuscation: disabled"
+    fi
+
+    # 8. clients: state.clients non-empty (warn if 0)
+    local client_count=0
+    if (( state_valid )); then
+        client_count=$(jq -r '.clients // {} | length' "$HVK_STATE" 2>/dev/null || echo 0)
+    fi
+    if (( client_count > 0 )); then
+        report_ok "clients: $client_count configured"
+    else
+        report_warn "clients: 0 configured"
+    fi
+
+    # 9. port: hvk_valid_port, UDP listens on state.port
+    if ! hvk_valid_port "$port"; then
+        report_fail "port: invalid port in state ($port)"
+    elif [[ -n $HVK_ROOT ]]; then
+        report_skip "port: listening check (sandbox mode)"
+    else
+        if ss -ulnH "sport = :$port" 2>/dev/null | grep -q ":$port\b"; then
+            report_ok "port: UDP port $port is listening"
+        else
+            report_fail "port: UDP port $port is not listening"
+        fi
+    fi
+
+    # 10. sysctl: file matches expected; effective rmem_max/wmem_max >= 7500000
+    if [[ -n $HVK_ROOT ]]; then
+        report_skip "sysctl buffers (sandbox mode)"
+    else
+        local cur_rmem cur_wmem sysctl_file="/etc/sysctl.d/99-hysteria-vps-kit.conf"
+        cur_rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
+        cur_wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
+        [[ $cur_rmem =~ ^[0-9]+$ ]] || cur_rmem=0
+        [[ $cur_wmem =~ ^[0-9]+$ ]] || cur_wmem=0
+        if [[ -f $sysctl_file ]] && (( cur_rmem >= 7500000 && cur_wmem >= 7500000 )); then
+            report_ok "sysctl: UDP receive/send buffers optimal (rmem_max=$cur_rmem, wmem_max=$cur_wmem)"
+        else
+            report_warn "sysctl: UDP buffers sub-optimal (rmem_max=$cur_rmem, wmem_max=$cur_wmem; recommended >= 7500000)"
+        fi
+    fi
+
+    # 11. endpoint: valid, not placeholder, not private
+    if ! hvk_valid_endpoint "$endpoint"; then
+        report_warn "endpoint: invalid endpoint '$endpoint'"
+    elif [[ $endpoint == "YOUR_SERVER_IP" ]]; then
+        report_warn "endpoint: placeholder 'YOUR_SERVER_IP' is still set"
+    elif hvk_is_private_ip "$endpoint"; then
+        report_warn "endpoint: '$endpoint' is a private/local IP address"
+    else
+        report_ok "endpoint: $endpoint"
+    fi
+
+    # 12. firewall: ufw active and rule for port exists; if state.firewall == ufw, rule required
+    if [[ -n $HVK_ROOT ]]; then
+        report_skip "firewall status (sandbox mode)"
+    else
+        local fw_state
+        fw_state=$(jq -r '.firewall // empty' "$HVK_STATE" 2>/dev/null || true)
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+            if ufw status 2>/dev/null | grep -q "$port/udp"; then
+                report_ok "firewall: ufw is active and allows UDP port $port"
+            else
+                report_warn "firewall: ufw is active but no rule allows UDP port $port"
+            fi
+        else
+            if [[ $fw_state == "ufw" ]]; then
+                report_warn "firewall: state records firewall=ufw but ufw is not active"
+            else
+                report_ok "firewall: ufw not active (unmanaged or other firewall in use)"
+            fi
+        fi
+    fi
+
+    # 13. kit version: VERSION matches state.version
+    local repo_ver state_ver
+    repo_ver=$(hvk_project_version "$project")
+    state_ver=$(jq -r '.version // empty' "$HVK_STATE" 2>/dev/null || true)
+    if [[ -n $state_ver && "$repo_ver" == "$state_ver" ]]; then
+        report_ok "kit version: $repo_ver matches state"
+    else
+        report_warn "kit version: mismatch (installed: $state_ver, kit files: $repo_ver)"
+    fi
+
+    trap - EXIT
+    cleanup_doctor
+
+    printf 'doctor: %d ok, %d warnings, %d failures\n' "$ok_count" "$warn_count" "$fail_count"
+    (( fail_count == 0 )) || return 1
+    return 0
+}
+
 cmd=${1:-help}
 [[ $# -eq 0 ]] || shift
 case $cmd in
     help|-h|--help) usage ;;
+    doctor)
+        hvk_require_root
+        doctor
+        ;;
     version)
         hvk_require_state
         printf 'hysteria-vps-kit %s, Hysteria2 core %s\n' "$(hvk_project_version "$project")" "$(hvk_state_get .core)"

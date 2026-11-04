@@ -254,12 +254,26 @@ hvk_pin() { # SHA-256 of the certificate, lower-case hex, no colons
     openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'
 }
 
-hvk_render_config() {
+hvk_render_config_to() { # hvk_render_config_to PATH
+    local target=$1
     local port obfs_enabled obfs_password sni
     port=$(hvk_state_get .port)
     sni=$(hvk_state_get .sni)
     obfs_enabled=$(hvk_state_get .obfs.enabled)
     obfs_password=$(hvk_state_get .obfs.password)
+    {
+        printf 'listen: :%s\n' "$port"
+        if [[ $obfs_enabled == true ]]; then
+            printf 'obfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$obfs_password"
+        fi
+        printf 'tls:\n  cert: %s\n  key: %s\n' "${HVK_CERT#"$HVK_ROOT"}" "${HVK_KEY#"$HVK_ROOT"}"
+        printf 'auth:\n  type: userpass\n  userpass:\n'
+        jq -r '.clients | to_entries[] | "    \(.key | @json): \(.value | @json)"' "$HVK_STATE"
+        printf 'masquerade:\n  type: proxy\n  proxy:\n    url: https://%s/\n    rewriteHost: true\n' "$sni"
+    } > "$target"
+}
+
+hvk_render_config() {
     local tmp_cfg="$HVK_CONFIG.new"
     rm -f "$tmp_cfg"
     # Create file immediately with 0640 permissions
@@ -270,16 +284,7 @@ hvk_render_config() {
         touch "$tmp_cfg"
         umask "$old_u"
     }
-    if {
-        printf 'listen: :%s\n' "$port"
-        if [[ $obfs_enabled == true ]]; then
-            printf 'obfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$obfs_password"
-        fi
-        printf 'tls:\n  cert: %s\n  key: %s\n' "${HVK_CERT#"$HVK_ROOT"}" "${HVK_KEY#"$HVK_ROOT"}"
-        printf 'auth:\n  type: userpass\n  userpass:\n'
-        jq -r '.clients | to_entries[] | "    \(.key | @json): \(.value | @json)"' "$HVK_STATE"
-        printf 'masquerade:\n  type: proxy\n  proxy:\n    url: https://%s/\n    rewriteHost: true\n' "$sni"
-    } > "$tmp_cfg"; then
+    if hvk_render_config_to "$tmp_cfg"; then
         chmod 640 "$tmp_cfg"
         mv -f "$tmp_cfg" "$HVK_CONFIG"
         if [[ -z $HVK_ROOT ]]; then chown "root:$HVK_USER" "$HVK_CONFIG"; fi

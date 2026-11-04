@@ -159,7 +159,7 @@ fi
 
 if (( need_core )); then
     if [[ $no_service == 1 ]]; then
-        if [[ -n $binary ]]; then install -m 755 "$binary" "$HVK_CORE_BIN"; else printf '#!/bin/sh\nexit 0\n' > "$HVK_CORE_BIN"; chmod 755 "$HVK_CORE_BIN"; fi
+        if [[ -n $binary ]]; then install -m 755 "$binary" "$HVK_CORE_BIN"; else printf '#!/bin/sh\necho "hysteria %s"\nexit 0\n' "$HVK_CORE_VERSION" > "$HVK_CORE_BIN"; chmod 755 "$HVK_CORE_BIN"; fi
     else
         tmp=$(mktemp -d)
         trap 'rm -rf "$tmp"' EXIT
@@ -300,8 +300,8 @@ hvk_ensure_sysctl || true
 # --- command link, unit, service ---
 chmod +x "$project/hy2-client" "$project/update.sh" "$project/uninstall.sh"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
+hvk_install_unit
 if [[ $no_service == 0 ]]; then
-    hvk_install_unit
     systemctl daemon-reload
     systemctl enable "$HVK_SERVICE" > /dev/null 2>&1 || true
     systemctl restart "$HVK_SERVICE"
