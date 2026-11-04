@@ -255,6 +255,11 @@ suite_update() {
     rm -rf "$E/config.yaml.new"
     check 'subsequent update detects update available' test "$(env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git --check >/dev/null 2>&1; echo $?)" = 10
     refuse 'subsequent update does not claim up to date' contains <(env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git --check 2>&1 || true) 'up to date'
+
+    # Incomplete installation must not be silently completed by update.sh
+    jq '.status = "installing"' "$E/state.json" > "$sandbox/y" && mv "$sandbox/y" "$E/state.json"
+    refuse 'update refuses incomplete installation' env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git
+    check 'status unchanged after refused update' test "$(jq -r .status "$E/state.json")" = "installing"
     rm -rf "$sandbox"
 }
 

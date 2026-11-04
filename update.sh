@@ -29,6 +29,11 @@ done
 hvk_require_root
 hvk_require_state
 
+status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
+if [[ $status == "installing" ]]; then
+    hvk_die "incomplete installation detected (status: installing); run 'bash install.sh --repair' to complete it, not update.sh"
+fi
+
 if (( ! check )); then
     hvk_lock
 fi
