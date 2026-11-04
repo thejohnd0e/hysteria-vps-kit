@@ -67,6 +67,7 @@ while (( $# )); do
 done
 if [[ -n ${HVK_ROOT:-} && $no_service == 0 ]]; then printf 'error: --root requires --no-service\n' >&2; exit 2; fi
 if [[ $no_service == 1 && -z ${HVK_ROOT:-} ]]; then printf 'error: --no-service requires --root DIR\n' >&2; exit 2; fi
+if (( force_secrets && ! repair )); then printf 'error: --force-secrets requires --repair\n' >&2; exit 2; fi
 
 # shellcheck source=lib/common.sh
 source "$project/lib/common.sh"

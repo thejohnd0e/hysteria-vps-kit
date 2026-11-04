@@ -50,6 +50,7 @@ suite_validation() {
     refuse 'rejects bad endpoint 1.2.3.4.5' install_sandbox --endpoint '1.2.3.4.5'
     refuse 'rejects bad endpoint leading zero 010.0.0.1' install_sandbox --endpoint '010.0.0.1'
     refuse 'rejects a bad client name' install_sandbox --first-client '@bad'
+    refuse 'force-secrets requires repair' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --force-secrets
     refuse '--root without --no-service' bash "$project/install.sh" --root "$sandbox"
     refuse '--no-service without --root' bash "$project/install.sh" --no-service
     refuse 'unknown option' bash "$project/install.sh" --nope
