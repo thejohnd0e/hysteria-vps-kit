@@ -78,12 +78,18 @@ hvk_valid_domain() {
     local domain=$1
     [[ -n $domain && ${#domain} -le 253 ]] || return 1
     [[ $domain != .* && $domain != *..* && $domain != *. ]] || return 1
-    local label last_label=""
+    [[ ! $domain =~ [[:space:]] ]] || return 1
+    local old_f
+    [[ $- == *f* ]] && old_f=1 || old_f=0
+    set -f
     local old_ifs=$IFS
     IFS=.
     # shellcheck disable=SC2086
     set -- $domain
     IFS=$old_ifs
+    (( old_f )) || set +f
+    (( $# >= 1 )) || return 1
+    local label last_label=""
     for label in "$@"; do
         [[ ${#label} -ge 1 && ${#label} -le 63 ]] || return 1
         [[ $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
@@ -147,7 +153,19 @@ hvk_validate_state() {
     if ! jq empty "$HVK_STATE" > /dev/null 2>&1; then
         hvk_die "state file contains invalid JSON: $HVK_STATE"
     fi
-    local port sni pin obfs_enabled clients_type
+    local version core endpoint port sni pin obfs_enabled clients_type status
+    version=$(jq -r '.version // empty' "$HVK_STATE" 2> /dev/null || true)
+    [[ -n $version ]] || hvk_die "state.json has missing or empty version"
+    core=$(jq -r '.core // empty' "$HVK_STATE" 2> /dev/null || true)
+    [[ -n $core ]] || hvk_die "state.json has missing or empty core"
+    endpoint=$(jq -r '.endpoint // empty' "$HVK_STATE" 2> /dev/null || true)
+    if [[ -z $endpoint ]] || ! hvk_valid_endpoint "$endpoint"; then
+        hvk_die "state.json has invalid or empty endpoint: $endpoint"
+    fi
+    status=$(jq -r '.status // empty' "$HVK_STATE" 2> /dev/null || true)
+    if [[ -n $status && $status != "ready" && $status != "installing" && $status != "updating" ]]; then
+        hvk_die "state.json has invalid status: $status"
+    fi
     port=$(jq -r '.port // empty' "$HVK_STATE" 2> /dev/null || true)
     hvk_valid_port "$port" || hvk_die "state.json has invalid port: $port"
     sni=$(jq -r '.sni // empty' "$HVK_STATE" 2> /dev/null || true)
@@ -242,7 +260,17 @@ hvk_render_config() {
     sni=$(hvk_state_get .sni)
     obfs_enabled=$(hvk_state_get .obfs.enabled)
     obfs_password=$(hvk_state_get .obfs.password)
-    {
+    local tmp_cfg="$HVK_CONFIG.new"
+    rm -f "$tmp_cfg"
+    # Create file immediately with 0640 permissions
+    install -m 640 /dev/null "$tmp_cfg" 2>/dev/null || {
+        local old_u
+        old_u=$(umask)
+        umask 027
+        touch "$tmp_cfg"
+        umask "$old_u"
+    }
+    if {
         printf 'listen: :%s\n' "$port"
         if [[ $obfs_enabled == true ]]; then
             printf 'obfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$obfs_password"
@@ -251,10 +279,14 @@ hvk_render_config() {
         printf 'auth:\n  type: userpass\n  userpass:\n'
         jq -r '.clients | to_entries[] | "    \(.key | @json): \(.value | @json)"' "$HVK_STATE"
         printf 'masquerade:\n  type: proxy\n  proxy:\n    url: https://%s/\n    rewriteHost: true\n' "$sni"
-    } > "$HVK_CONFIG.new"
-    chmod 640 "$HVK_CONFIG.new"
-    mv -f "$HVK_CONFIG.new" "$HVK_CONFIG"
-    if [[ -z $HVK_ROOT ]]; then chown "root:$HVK_USER" "$HVK_CONFIG"; fi
+    } > "$tmp_cfg"; then
+        chmod 640 "$tmp_cfg"
+        mv -f "$tmp_cfg" "$HVK_CONFIG"
+        if [[ -z $HVK_ROOT ]]; then chown "root:$HVK_USER" "$HVK_CONFIG"; fi
+    else
+        rm -f "$tmp_cfg"
+        hvk_die "could not render configuration to $HVK_CONFIG"
+    fi
 }
 
 hvk_restart_service() {

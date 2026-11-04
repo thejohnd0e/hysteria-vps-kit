@@ -43,6 +43,7 @@ Nothing else in your firewall is touched.
 | `--endpoint IPV4/HOST` | detected | address written into client URIs (IPv4 or DNS domain) |
 | `--no-obfs` | | turn Salamander obfuscation off (not recommended) |
 | `--repair` | | resume an incomplete installation without regenerating existing secrets |
+| `--force-secrets` | | with `--repair`: allow regenerating TLS key and certificate if missing or mismatched (invalidates all issued client profiles) |
 | `--binary FILE` | download | use a local core binary (the SHA-256 is still checked) |
 | `--non-interactive` | | use flags and defaults without questions |
 

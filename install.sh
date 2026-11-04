@@ -37,6 +37,7 @@ Usage: install.sh [options]
   --endpoint IPV4/HOST   address written into client URIs (default: detected)
   --no-obfs              disable Salamander obfuscation (not recommended)
   --repair               repair an incomplete or broken installation without regenerating secrets
+  --force-secrets        with --repair: allow regenerating TLS key and certificate if missing or mismatched
   --non-interactive      use flags and defaults without questions
   --no-service --root DIR  testing only: write files under DIR, no systemd, user, firewall or download
   --binary FILE          use this Hysteria2 binary instead of downloading it (the sha256 is still checked,
@@ -45,7 +46,7 @@ Usage: install.sh [options]
 EOF
 }
 
-port=443 sni=www.bing.com first_client=main-user create_client=1 endpoint='' obfs=true interactive=1 no_service=0 binary='' repair=0
+port=443 sni=www.bing.com first_client=main-user create_client=1 endpoint='' obfs=true interactive=1 no_service=0 binary='' repair=0 force_secrets=0
 while (( $# )); do
     case $1 in
         --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -55,6 +56,7 @@ while (( $# )); do
         --endpoint) endpoint=${2:?--endpoint needs a value}; shift 2 ;;
         --no-obfs) obfs=false; shift ;;
         --repair) repair=1; shift ;;
+        --force-secrets) force_secrets=1; shift ;;
         --non-interactive) interactive=0; shift ;;
         --no-service) no_service=1; shift ;;
         --root) export HVK_ROOT=${2:?--root needs a value}; shift 2 ;;
@@ -83,7 +85,13 @@ if [[ $no_service == 0 ]]; then
 fi
 
 if [[ -f $HVK_STATE ]]; then
-    status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
+    if ! jq empty "$HVK_STATE" > /dev/null 2>&1; then
+        hvk_die "state file contains invalid JSON: $HVK_STATE"
+    fi
+    if (( repair )); then
+        hvk_validate_state
+    fi
+    status=$(jq -r '.status // "ready"' "$HVK_STATE")
     if (( ! repair )); then
         if [[ $status == "ready" ]]; then
             hvk_die "already installed ($HVK_STATE exists); use update.sh, or uninstall.sh first"
@@ -185,11 +193,32 @@ if [[ $no_service == 0 ]]; then
     chown "root:$HVK_USER" "$HVK_ETC"
 fi
 
-need_cert=1
-if (( repair )) && [[ -s $HVK_KEY && -s $HVK_CERT ]]; then
-    if openssl x509 -in "$HVK_CERT" -noout > /dev/null 2>&1; then
-        need_cert=0
+cert_ok=0
+if [[ -s $HVK_KEY && -s $HVK_CERT ]]; then
+    cert_pub=$(openssl x509 -in "$HVK_CERT" -pubkey -noout 2>/dev/null || true)
+    key_pub=$(openssl pkey -in "$HVK_KEY" -pubout 2>/dev/null || true)
+    if [[ -n $cert_pub && -n $key_pub && $cert_pub == "$key_pub" ]]; then
+        cert_ok=1
     fi
+fi
+
+need_cert=0
+if (( ! repair )); then
+    need_cert=1
+elif (( ! cert_ok )); then
+    if (( ! force_secrets )); then
+        hvk_die "certificate and key are missing or do not match; existing client profiles will stop working if regenerated. Re-run with --repair --force-secrets to regenerate anyway"
+    fi
+    if (( interactive )) && [[ -t 0 ]]; then
+        read -r -p "Regenerating certificate will invalidate all existing client profiles. Continue? [y/N] " answer || true
+        [[ $answer == [yY]* ]] || { printf 'aborted\n'; exit 1; }
+    fi
+    need_cert=1
+fi
+
+old_pin=""
+if (( repair )); then
+    old_pin=$(jq -r '.pin // ""' "$HVK_STATE" 2>/dev/null || true)
 fi
 
 if (( need_cert )); then
@@ -202,6 +231,10 @@ fi
 chmod 640 "$HVK_KEY" "$HVK_CERT"
 [[ $no_service == 1 ]] || chown "root:$HVK_USER" "$HVK_KEY" "$HVK_CERT"
 pin=$(hvk_pin "$HVK_CERT")
+
+if (( repair )) && [[ -n $old_pin && $old_pin != "$pin" ]]; then
+    hvk_log "WARNING: certificate pin changed: old=$old_pin new=$pin. All issued client profiles (URIs, QR codes, client.yaml) must be re-issued!"
+fi
 
 if [[ -z $endpoint ]]; then endpoint=$(hvk_detect_endpoint || true); fi
 if [[ -z $endpoint ]]; then
@@ -261,16 +294,16 @@ else
     fi
 fi
 hvk_render_config
-[[ $no_service == 0 ]] || hvk_ensure_sysctl || true
+hvk_ensure_sysctl || true
 
 # --- command link, unit, service ---
 chmod +x "$project/hy2-client" "$project/update.sh" "$project/uninstall.sh"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
 if [[ $no_service == 0 ]]; then
     hvk_install_unit
-    hvk_ensure_sysctl || true
     systemctl daemon-reload
-    systemctl enable --now "$HVK_SERVICE" > /dev/null 2>&1
+    systemctl enable "$HVK_SERVICE" > /dev/null 2>&1 || true
+    systemctl restart "$HVK_SERVICE"
     sleep 2
     systemctl is-active --quiet "$HVK_SERVICE" || hvk_die "service did not start: journalctl -u $HVK_SERVICE -n 30"
     hvk_udp_port_busy "$port" || hvk_log "warning: nothing is listening on $port/udp yet"

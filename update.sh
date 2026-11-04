@@ -14,17 +14,20 @@ fi
 project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=lib/common.sh
 source "$project/lib/common.sh"
-hvk_require_root
-hvk_require_state
 
 check=0
+no_git=${HVK_NO_GIT:-0}
 for arg in "$@"; do
     case $arg in
         --check) check=1 ;;
-        -h|--help) printf 'Usage: update.sh [--check]\n'; exit 0 ;;
+        --no-git) no_git=1 ;;
+        -h|--help) printf 'Usage: update.sh [--check] [--no-git]\n'; exit 0 ;;
         *) hvk_die "unknown option: $arg" ;;
     esac
 done
+
+hvk_require_root
+hvk_require_state
 
 if (( ! check )); then
     hvk_lock
@@ -32,8 +35,9 @@ fi
 
 old_kit=$(hvk_state_get .version)
 old_core=$(hvk_state_get .core)
+old_status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
 
-if [[ -d $project/.git ]]; then
+if (( ! no_git )) && [[ -d $project/.git ]]; then
     git -C "$project" fetch -q origin
     if [[ $(git -C "$project" rev-parse HEAD) != "$(git -C "$project" rev-parse '@{u}')" ]]; then
         if (( check )); then hvk_log "update available (kit $old_kit)"; exit 10; fi
@@ -43,17 +47,17 @@ if [[ -d $project/.git ]]; then
 fi
 
 new_kit=$(hvk_project_version "$project")
-if [[ $old_kit == "$new_kit" && $old_core == "$HVK_CORE_VERSION" ]]; then
+if [[ $old_kit == "$new_kit" && $old_core == "$HVK_CORE_VERSION" && $old_status == "ready" ]]; then
     hvk_log "up to date (kit $new_kit, core $old_core)"
     exit 0
 fi
-if (( check )); then hvk_log "update available: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION"; exit 10; fi
+if (( check )); then
+    hvk_log "update available: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION (status $old_status)"
+    exit 10
+fi
 
 # Prepare backup of consistent bundle
 backup_dir=$(mktemp -d "$HVK_ETC/.backup-update.XXXXXX")
-cleanup_backup() { rm -rf "$backup_dir"; }
-trap cleanup_backup EXIT
-
 cp -pf "$HVK_STATE" "$backup_dir/state.json"
 cp -pf "$HVK_CONFIG" "$backup_dir/config.yaml"
 [[ ! -f $HVK_CORE_BIN ]] || cp -pf "$HVK_CORE_BIN" "$backup_dir/hysteria"
@@ -73,7 +77,11 @@ if [[ $old_core != "$HVK_CORE_VERSION" ]]; then
     core_changed=1
 fi
 
+rolled_back=0
+update_succeeded=0
 rollback_update() {
+    if (( update_succeeded || rolled_back )); then return; fi
+    rolled_back=1
     hvk_log "error: update failed; rolling back to previous state..."
     cp -pf "$backup_dir/state.json" "$HVK_STATE"
     cp -pf "$backup_dir/config.yaml" "$HVK_CONFIG"
@@ -84,12 +92,17 @@ rollback_update() {
         cp -pf "$backup_dir/unit" "$HVK_UNIT"
         [[ -n $HVK_ROOT ]] || systemctl daemon-reload
     fi
+    hvk_log "backup preserved at $backup_dir"
     if hvk_restart_service; then
-        hvk_die "update failed: service did not start with new version; previous version was restored successfully"
+        hvk_die "update failed: previous version was restored successfully"
     else
         hvk_die "CRITICAL: update failed AND rollback failed to start the service; check logs: journalctl -u $HVK_SERVICE -n 50"
     fi
 }
+trap rollback_update EXIT
+
+# Mark updating state before applying changes
+hvk_state_update '.status = "updating"'
 
 if (( core_changed )); then
     [[ ! -f $HVK_CORE_BIN ]] || cp -p "$HVK_CORE_BIN" "$HVK_CORE_BIN.previous"
@@ -107,7 +120,9 @@ if ! hvk_restart_service; then
     rollback_update
 fi
 
-# Update succeeded: remove backup directory
+# Update verified and succeeded: finalize state and remove backup directory
+hvk_state_update '.status = "ready"'
+update_succeeded=1
 trap - EXIT
 rm -rf "$backup_dir"
 

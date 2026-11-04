@@ -38,6 +38,14 @@ suite_validation() {
     refuse 'rejects bad sni -foo.com' install_sandbox --sni '-foo.com'
     refuse 'rejects bad sni foo..com' install_sandbox --sni 'foo..com'
     refuse 'rejects bad sni foo-.com' install_sandbox --sni 'foo-.com'
+    refuse 'rejects wildcard sni *' install_sandbox --sni '*'
+    refuse 'rejects wildcard sni *.example.com' install_sandbox --sni '*.example.com'
+    (
+        local gd; gd=$(mktemp -d); cd "$gd" && touch bin etc usr
+        refuse 'rejects wildcard sni * with local unextended files' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --endpoint 203.0.113.7 --sni '*'
+        refuse 'rejects wildcard sni *.example.com with local unextended files' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --endpoint 203.0.113.7 --sni '*.example.com'
+        rm -rf "$gd"
+    )
     refuse 'rejects bad endpoint spaces' install_sandbox --endpoint 'bad ip'
     refuse 'rejects bad endpoint 1.2.3.4.5' install_sandbox --endpoint '1.2.3.4.5'
     refuse 'rejects bad endpoint leading zero 010.0.0.1' install_sandbox --endpoint '010.0.0.1'
@@ -130,6 +138,12 @@ suite_clients() {
     refuse 'user_to_remove was NOT restored after failed remove restart' contains "$sandbox/etc/hysteria-vps-kit/config.yaml" 'user_to_remove'
     refuse 'user_to_remove not in state after failed remove restart' contains "$sandbox/etc/hysteria-vps-kit/state.json" 'user_to_remove'
 
+    # Render failure on remove: fail-closed
+    check 'add user_render_fail' hy add user_render_fail
+    mkdir -p "$sandbox/etc/hysteria-vps-kit/config.yaml.new"
+    refuse 'remove fails when config render fails' hy remove user_render_fail
+    rm -rf "$sandbox/etc/hysteria-vps-kit/config.yaml.new"
+
     # Corrupted state handling
     echo '{invalid json' > "$sandbox/etc/hysteria-vps-kit/state.json"
     refuse 'corrupted state rejects hy list' hy list
@@ -183,6 +197,25 @@ suite_repair() {
     check 'certificate preserved after repair' test "$(cat "$sandbox/etc/hysteria-vps-kit/server.crt")" = "$orig_cert"
     check 'client preserved after repair' test "$(hy list)" = "user1"
     check 'ownership recorded' test "$(jq -r '.created_resources | has("user") and has("firewall_rule")' "$sandbox/etc/hysteria-vps-kit/state.json")" = "true"
+
+    # Repair refuses corrupted state
+    echo '{corrupt' > "$sandbox/etc/hysteria-vps-kit/state.json"
+    refuse 'repair refuses corrupted JSON state' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --repair
+
+    # Repair without key: refuses without --force-secrets, succeeds with it
+    rm -rf "$sandbox"
+    new_root
+    install_sandbox --first-client user1 > /dev/null
+    orig_pin=$(jq -r .pin "$sandbox/etc/hysteria-vps-kit/state.json")
+    rm -f "$sandbox/etc/hysteria-vps-kit/server.key"
+    jq '.status = "installing"' "$sandbox/etc/hysteria-vps-kit/state.json" > "$sandbox/etc/hysteria-vps-kit/state.json.tmp"
+    mv "$sandbox/etc/hysteria-vps-kit/state.json.tmp" "$sandbox/etc/hysteria-vps-kit/state.json"
+
+    refuse 'repair refuses to regenerate missing key without --force-secrets' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --repair
+    check 'pin unchanged after refused repair' test "$(jq -r .pin "$sandbox/etc/hysteria-vps-kit/state.json")" = "$orig_pin"
+    check 'repair with --force-secrets succeeds' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --repair --force-secrets
+    check 'pin changed after forced secret regeneration' test "$(jq -r .pin "$sandbox/etc/hysteria-vps-kit/state.json")" != "$orig_pin"
+    check 'clients kept after forced secret regeneration' test "$(hy list)" = "user1"
     rm -rf "$sandbox"
 }
 
@@ -190,7 +223,7 @@ suite_update() {
     printf 'suite: update\n'
     new_root
     install_sandbox > /dev/null
-    check 'update --check reports up to date' env HVK_ROOT="$sandbox" bash "$project/update.sh" --check
+    check 'update --check reports up to date' env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --check --no-git
 
     # Modify unit to simulate outdated unit
     mkdir -p "$sandbox/etc/systemd/system"
@@ -201,7 +234,7 @@ suite_update() {
     mv "$sandbox/etc/hysteria-vps-kit/state.json.tmp" "$sandbox/etc/hysteria-vps-kit/state.json"
 
     local out
-    out=$(env HVK_ROOT="$sandbox" bash "$project/update.sh")
+    out=$(env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git)
     check 'update runs without core change message' contains <(printf '%s' "$out") '(no core change)'
     refuse 'update does not claim previous core kept when unchanged' contains <(printf '%s' "$out") 'previous core kept'
     check 'unit was synchronized during update' contains "$sandbox/etc/systemd/system/hysteria-vps-kit.service" 'AmbientCapabilities=CAP_NET_BIND_SERVICE'
@@ -209,8 +242,19 @@ suite_update() {
     # Test update failure with restart failure: rollback
     jq '.version = "0.0.1"' "$sandbox/etc/hysteria-vps-kit/state.json" > "$sandbox/etc/hysteria-vps-kit/state.json.tmp"
     mv "$sandbox/etc/hysteria-vps-kit/state.json.tmp" "$sandbox/etc/hysteria-vps-kit/state.json"
-    refuse 'update with restart failure fails' env HVK_ROOT="$sandbox" HVK_MOCK_RESTART_FAIL=1 bash "$project/update.sh"
+    refuse 'update with restart failure fails' env HVK_ROOT="$sandbox" HVK_NO_GIT=1 HVK_MOCK_RESTART_FAIL=1 bash "$project/update.sh" --no-git
     check 'update rollback restored state version' test "$(jq -r .version "$sandbox/etc/hysteria-vps-kit/state.json")" = "0.0.1"
+
+    # Blocker 1 regression test: failure after state update (render failure)
+    local E="$sandbox/etc/hysteria-vps-kit"
+    jq '.version = "0.0.9"' "$E/state.json" > "$sandbox/y" && mv "$sandbox/y" "$E/state.json"
+    mkdir -p "$E/config.yaml.new"
+    refuse 'update fails when render fails' env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git
+    check 'backup directory preserved after failed update' test "$(find "$E" -name '.backup-update.*' | wc -l)" -ge 1
+    check 'state rolled back after failed render' test "$(jq -r .version "$E/state.json")" = "0.0.9"
+    rm -rf "$E/config.yaml.new"
+    check 'subsequent update detects update available' test "$(env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git --check >/dev/null 2>&1; echo $?)" = 10
+    refuse 'subsequent update does not claim up to date' contains <(env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git --check 2>&1 || true) 'up to date'
     rm -rf "$sandbox"
 }
 
