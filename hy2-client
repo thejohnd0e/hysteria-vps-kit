@@ -77,8 +77,7 @@ doctor() {
         report_fail "core binary: file not executable ($HVK_CORE_BIN)"
     else
         local core_out
-        core_out=$("$HVK_CORE_BIN" version 2>&1 || true)
-        if [[ -n $core_expected && $core_out == *"$core_expected"* ]]; then
+        if core_out=$("$HVK_CORE_BIN" version 2>&1) && [[ -n $core_expected && $core_out == *"$core_expected"* ]]; then
             report_ok "core binary is executable and matches expected version ($core_expected)"
         else
             report_fail "core binary: execution failed or version mismatch (expected $core_expected)"
@@ -204,10 +203,10 @@ doctor() {
         cur_wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
         [[ $cur_rmem =~ ^[0-9]+$ ]] || cur_rmem=0
         [[ $cur_wmem =~ ^[0-9]+$ ]] || cur_wmem=0
-        if [[ -f $sysctl_file ]] && (( cur_rmem >= 7500000 && cur_wmem >= 7500000 )); then
+        if hvk_sysctl_file_valid "$sysctl_file" && (( cur_rmem >= 7500000 && cur_wmem >= 7500000 )); then
             report_ok "sysctl: UDP receive/send buffers optimal (rmem_max=$cur_rmem, wmem_max=$cur_wmem)"
         else
-            report_warn "sysctl: UDP buffers sub-optimal (rmem_max=$cur_rmem, wmem_max=$cur_wmem; recommended >= 7500000)"
+            report_warn "sysctl: persistent settings missing or incorrect, or UDP buffers below recommended levels (rmem_max=$cur_rmem, wmem_max=$cur_wmem; recommended >= 7500000)"
         fi
     fi
 
@@ -229,7 +228,7 @@ doctor() {
         local fw_state
         fw_state=$(jq -r '.firewall // empty' "$HVK_STATE" 2>/dev/null || true)
         if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-            if ufw status 2>/dev/null | grep -q "$port/udp"; then
+            if hvk_ufw_allows_udp "$port"; then
                 report_ok "firewall: ufw is active and allows UDP port $port"
             else
                 report_warn "firewall: ufw is active but no rule allows UDP port $port"

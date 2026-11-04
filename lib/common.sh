@@ -268,7 +268,7 @@ hvk_render_config_to() { # hvk_render_config_to PATH
         fi
         printf 'tls:\n  cert: %s\n  key: %s\n' "${HVK_CERT#"$HVK_ROOT"}" "${HVK_KEY#"$HVK_ROOT"}"
         printf 'auth:\n  type: userpass\n  userpass:\n'
-        jq -r '.clients | to_entries[] | "    \(.key | @json): \(.value | @json)"' "$HVK_STATE"
+        jq -r '.clients | to_entries[] | "    \(.key | @json): \(.value | @json)"' "$HVK_STATE" || return 1
         printf 'masquerade:\n  type: proxy\n  proxy:\n    url: https://%s/\n    rewriteHost: true\n' "$sni"
     } > "$target"
 }
@@ -290,7 +290,8 @@ hvk_render_config() {
         if [[ -z $HVK_ROOT ]]; then chown "root:$HVK_USER" "$HVK_CONFIG"; fi
     else
         rm -f "$tmp_cfg"
-        hvk_die "could not render configuration to $HVK_CONFIG"
+        printf 'error: could not render configuration to %s\n' "$HVK_CONFIG" >&2
+        return 1
     fi
 }
 
@@ -348,6 +349,23 @@ hvk_detect_endpoint() {
 hvk_udp_port_busy() { # 0 = a UDP socket already listens on the port
     command -v ss > /dev/null 2>&1 || return 1
     ss -lnuH 2> /dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"
+}
+
+hvk_ufw_allows_udp() {
+    ufw status 2>/dev/null | awk -v port="$1" '
+        $1 == port "/udp" && $2 == "ALLOW" { found=1 }
+        $1 == port "/udp" && ($2 == "DENY" || $2 == "REJECT") { denied=1 }
+        END { exit !(found && !denied) }
+    '
+}
+
+hvk_sysctl_file_valid() {
+    [[ -f $1 ]] || return 1
+    awk '
+        /^[[:space:]]*net\.core\.rmem_max[[:space:]]*=/ { r = $3 }
+        /^[[:space:]]*net\.core\.wmem_max[[:space:]]*=/ { w = $3 }
+        END { exit !(r == "7500000" && w == "7500000") }
+    ' "$1"
 }
 
 HVK_SYSCTL=$HVK_ROOT/etc/sysctl.d/99-hysteria-vps-kit.conf

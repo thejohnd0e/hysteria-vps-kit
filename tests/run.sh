@@ -92,6 +92,19 @@ suite_render() {
     check 'client entry quoted' contains "$cfg" '"main-user": "'
     check 'masquerade uses the SNI' contains "$cfg" 'url: https://www.example.com/'
     check 'config is group-readable, not world' test "$(stat -c %a "$cfg")" = 640
+    mkdir -p "$sandbox/mockbin"
+    cat > "$sandbox/mockbin/jq" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    [[ $arg != *to_entries* ]] || exit 42
+done
+exec /usr/bin/jq "$@"
+EOF
+    chmod +x "$sandbox/mockbin/jq"
+    cp "$cfg" "$sandbox/original-config"
+    refuse 'failed client render rejects add' env PATH="$sandbox/mockbin:$PATH" HVK_ROOT="$sandbox" bash "$project/hy2-client" add render_failure
+    check 'failed client render preserves config' cmp "$cfg" "$sandbox/original-config"
+    refuse 'failed client render rolls back state' grep -q render_failure "$sandbox/etc/hysteria-vps-kit/state.json"
     rm -rf "$sandbox"
 }
 
@@ -324,6 +337,30 @@ suite_doctor() {
     HVK_ROOT=$sandbox bash -c "source '$project/lib/common.sh'; hvk_render_config"
     check 'doctor succeeds with 0 clients (warn only)' hy doctor
     check 'doctor reports warning for 0 clients' bash -c "HVK_ROOT=$sandbox bash '$project/hy2-client' doctor | grep -q '^\\[WARN\\] clients: 0 configured'"
+    cat > "$sandbox/opt/hysteria-vps-kit/hysteria" <<'EOF'
+#!/usr/bin/env bash
+printf '2.13.0\n'
+exit 1
+EOF
+    chmod +x "$sandbox/opt/hysteria-vps-kit/hysteria"
+    refuse 'doctor rejects failed core version command' hy doctor
+    mkdir -p "$sandbox/mockbin"
+    cat > "$sandbox/mockbin/ufw" <<'EOF'
+#!/usr/bin/env bash
+printf 'Status: active\n443/udp DENY IN Anywhere\n'
+EOF
+    chmod +x "$sandbox/mockbin/ufw"
+    # shellcheck disable=SC2016
+    refuse 'denied UFW port is not allowed' env PATH="$sandbox/mockbin:$PATH" bash -c 'source "$1/lib/common.sh"; hvk_ufw_allows_udp 443' _ "$project"
+    sed -i 's/DENY/ALLOW/' "$sandbox/mockbin/ufw"
+    # shellcheck disable=SC2016
+    check 'allowed UFW port is recognized' env PATH="$sandbox/mockbin:$PATH" bash -c 'source "$1/lib/common.sh"; hvk_ufw_allows_udp 443' _ "$project"
+    printf 'net.core.rmem_max = 1\nnet.core.wmem_max = 1\n' > "$sandbox/sysctl.conf"
+    # shellcheck disable=SC2016
+    refuse 'invalid persistent sysctl is rejected' bash -c 'source "$1/lib/common.sh"; hvk_sysctl_file_valid "$2"' _ "$project" "$sandbox/sysctl.conf"
+    printf 'net.core.rmem_max = 7500000\nnet.core.wmem_max = 7500000\n' > "$sandbox/sysctl.conf"
+    # shellcheck disable=SC2016
+    check 'expected persistent sysctl is accepted' bash -c 'source "$1/lib/common.sh"; hvk_sysctl_file_valid "$2"' _ "$project" "$sandbox/sysctl.conf"
     rm -rf "$sandbox"
 }
 
