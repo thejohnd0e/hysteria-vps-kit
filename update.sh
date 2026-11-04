@@ -130,6 +130,7 @@ hvk_state_update '.status = "ready"'
 update_succeeded=1
 trap - EXIT
 rm -rf "$backup_dir"
+find "$HVK_ETC" -maxdepth 1 -type d -name '.backup-update.*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
 if (( core_changed )); then
     hvk_log "updated: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION (previous core kept as $HVK_CORE_BIN.previous)"
