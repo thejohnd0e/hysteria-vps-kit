@@ -104,8 +104,10 @@ doctor() {
         report_skip "service status (sandbox mode)"
     else
         local is_act is_enb
-        is_act=$(systemctl is-active "$HVK_SERVICE" 2>/dev/null || echo "inactive")
-        is_enb=$(systemctl is-enabled "$HVK_SERVICE" 2>/dev/null || echo "disabled")
+        is_act=$(systemctl is-active "$HVK_SERVICE" 2>/dev/null || true)
+        [[ -n $is_act ]] || is_act="inactive"
+        is_enb=$(systemctl is-enabled "$HVK_SERVICE" 2>/dev/null || true)
+        [[ -n $is_enb ]] || is_enb="disabled"
         if [[ $is_act == "active" && $is_enb == "enabled" ]]; then
             report_ok "service is active and enabled"
         else

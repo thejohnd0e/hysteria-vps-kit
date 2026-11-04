@@ -56,6 +56,7 @@ hy2-client show phone         # hysteria2:// URI
 hy2-client show phone --qr    # QR code
 hy2-client show phone --yaml --http 0.0.0.0:9230 --socks 0.0.0.0:8230   # client.yaml for the Hysteria2 client
 hy2-client remove phone
+hy2-client doctor          # read-only diagnostics; exit 1 if a check failed
 hy2-client version
 ```
 
@@ -105,7 +106,7 @@ Uninstall removes project-created resources (tracked in `state.json`). If a syst
 
 ```bash
 bash tests/lint.sh     # bash -n + ShellCheck
-bash tests/run.sh      # sandbox suites (install, render, clients, uninstall): no systemd, no network
+bash tests/run.sh      # sandbox suites (validation, install, render, clients, locking, repair, update, uninstall, doctor): no systemd, no network
 ```
 
 The sandbox suites run in CI. Verified by hand on a Debian 13 VM: real install with download and hash check,
