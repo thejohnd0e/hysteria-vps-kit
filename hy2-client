@@ -227,7 +227,7 @@ doctor() {
     else
         local fw_state
         fw_state=$(jq -r '.firewall // empty' "$HVK_STATE" 2>/dev/null || true)
-        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+        if command -v ufw >/dev/null 2>&1 && hvk_ufw_is_active; then
             if hvk_ufw_allows_udp "$port"; then
                 report_ok "firewall: ufw is active and allows UDP port $port"
             else

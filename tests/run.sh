@@ -350,6 +350,17 @@ EOF
 printf 'Status: active\n443/udp DENY IN Anywhere\n'
 EOF
     chmod +x "$sandbox/mockbin/ufw"
+    cat > "$sandbox/mockbin/ufw" <<'EOF'
+#!/usr/bin/env bash
+printf 'Status: active\n'
+for ((i=0; i<20000; i++)); do printf '443/udp DENY IN Anywhere\n'; done
+EOF
+    # shellcheck disable=SC2016
+    check 'active UFW with long output is detected' env PATH="$sandbox/mockbin:$PATH" bash -c 'set -o pipefail; source "$1/lib/common.sh"; hvk_ufw_is_active' _ "$project"
+    cat > "$sandbox/mockbin/ufw" <<'EOF'
+#!/usr/bin/env bash
+printf 'Status: active\n443/udp DENY IN Anywhere\n'
+EOF
     # shellcheck disable=SC2016
     refuse 'denied UFW port is not allowed' env PATH="$sandbox/mockbin:$PATH" bash -c 'source "$1/lib/common.sh"; hvk_ufw_allows_udp 443' _ "$project"
     sed -i 's/DENY/ALLOW/' "$sandbox/mockbin/ufw"

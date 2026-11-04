@@ -351,6 +351,10 @@ hvk_udp_port_busy() { # 0 = a UDP socket already listens on the port
     ss -lnuH 2> /dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"
 }
 
+hvk_ufw_is_active() {
+    ufw status 2>/dev/null | grep '^Status: active' >/dev/null
+}
+
 hvk_ufw_allows_udp() {
     ufw status 2>/dev/null | awk -v port="$1" '
         $1 == port "/udp" && $2 == "ALLOW" { found=1 }
