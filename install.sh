@@ -36,6 +36,7 @@ Usage: install.sh [options]
   --no-first-client      do not create an identity
   --endpoint IPV4/HOST   address written into client URIs (default: detected)
   --no-obfs              disable Salamander obfuscation (not recommended)
+  --repair               repair an incomplete or broken installation without regenerating secrets
   --non-interactive      use flags and defaults without questions
   --no-service --root DIR  testing only: write files under DIR, no systemd, user, firewall or download
   --binary FILE          use this Hysteria2 binary instead of downloading it (the sha256 is still checked,
@@ -44,7 +45,7 @@ Usage: install.sh [options]
 EOF
 }
 
-port=443 sni=www.bing.com first_client=main-user create_client=1 endpoint='' obfs=true interactive=1 no_service=0 binary=''
+port=443 sni=www.bing.com first_client=main-user create_client=1 endpoint='' obfs=true interactive=1 no_service=0 binary='' repair=0
 while (( $# )); do
     case $1 in
         --port) port=${2:?--port needs a value}; shift 2 ;;
@@ -53,6 +54,7 @@ while (( $# )); do
         --no-first-client) create_client=0; shift ;;
         --endpoint) endpoint=${2:?--endpoint needs a value}; shift 2 ;;
         --no-obfs) obfs=false; shift ;;
+        --repair) repair=1; shift ;;
         --non-interactive) interactive=0; shift ;;
         --no-service) no_service=1; shift ;;
         --root) export HVK_ROOT=${2:?--root needs a value}; shift 2 ;;
@@ -67,6 +69,7 @@ if [[ $no_service == 1 && -z ${HVK_ROOT:-} ]]; then printf 'error: --no-service 
 # shellcheck source=lib/common.sh
 source "$project/lib/common.sh"
 hvk_require_root
+hvk_lock
 
 if [[ $no_service == 0 ]]; then
     [[ -f /etc/os-release ]] || hvk_die 'cannot detect the operating system'
@@ -77,17 +80,44 @@ if [[ $no_service == 0 ]]; then
         *) hvk_die "unsupported operating system: $os (Debian 12/13 or Ubuntu 22.04/24.04)" ;;
     esac
     command -v systemctl > /dev/null || hvk_die 'systemd is required'
-    if [[ -f $HVK_STATE ]]; then hvk_die "already installed ($HVK_STATE exists); use update.sh, or uninstall.sh first"; fi
 fi
 
-if (( interactive )) && [[ -t 0 ]]; then
-    read -r -p "UDP port [$port]: " answer || true; port=${answer:-$port}
-    read -r -p "SNI / masquerade site [$sni]: " answer || true; sni=${answer:-$sni}
+if [[ -f $HVK_STATE ]]; then
+    status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
+    if (( ! repair )); then
+        if [[ $status == "ready" ]]; then
+            hvk_die "already installed ($HVK_STATE exists); use update.sh, or uninstall.sh first"
+        else
+            hvk_die "incomplete installation detected ($HVK_STATE has status '$status'); run 'install.sh --repair' to complete it, or 'uninstall.sh' to remove it first"
+        fi
+    fi
+elif (( repair )); then
+    hvk_die "cannot repair: $HVK_STATE does not exist; run install.sh without --repair"
 fi
+
+if (( repair )); then
+    # In repair mode, preserve existing state values
+    port=$(jq -r '.port // 443' "$HVK_STATE")
+    sni=$(jq -r '.sni // "www.bing.com"' "$HVK_STATE")
+    endpoint=$(jq -r '.endpoint // ""' "$HVK_STATE")
+    obfs=$(jq -r '.obfs.enabled // true' "$HVK_STATE")
+    create_client=0
+else
+    if (( interactive )) && [[ -t 0 ]]; then
+        read -r -p "UDP port [$port]: " answer || true; port=${answer:-$port}
+        read -r -p "SNI / masquerade site [$sni]: " answer || true; sni=${answer:-$sni}
+    fi
+fi
+
 hvk_valid_port "$port" || hvk_die "invalid port: $port"
-[[ $sni =~ ^[A-Za-z0-9.-]+$ ]] || hvk_die "invalid SNI: $sni"
-if (( create_client )); then hvk_valid_name "$first_client" || hvk_die "invalid client name: $first_client (letters, digits, _ . @ -, up to 32, start with a letter or digit)"; fi
-if [[ $no_service == 0 ]] && hvk_udp_port_busy "$port"; then
+hvk_valid_sni "$sni" || hvk_die "invalid SNI: $sni"
+if [[ -n $endpoint ]]; then
+    hvk_valid_endpoint "$endpoint" || hvk_die "invalid endpoint: $endpoint (must be an IPv4 address or DNS domain name)"
+fi
+if (( create_client )); then
+    hvk_valid_name "$first_client" || hvk_die "invalid client name: $first_client (letters, digits, _ . @ -, up to 32, start with a letter or digit)"
+fi
+if [[ $no_service == 0 ]] && (( ! repair )) && hvk_udp_port_busy "$port"; then
     hvk_die "UDP port $port is already in use (AmneziaWG often takes 443/udp); choose another with --port"
 fi
 
@@ -111,80 +141,133 @@ install -d -m 755 "$HVK_OPT" "$HVK_ROOT/usr/local/bin"
 install -d -m 750 "$HVK_ETC"
 
 # --- core binary ---
-if [[ $no_service == 1 ]]; then
-    if [[ -n $binary ]]; then install -m 755 "$binary" "$HVK_CORE_BIN"; else printf '#!/bin/sh\nexit 0\n' > "$HVK_CORE_BIN"; chmod 755 "$HVK_CORE_BIN"; fi
-else
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
-    if [[ -n $binary ]]; then
-        cp "$binary" "$tmp/hysteria"
-    else
-        hvk_log "Downloading Hysteria2 v$HVK_CORE_VERSION ($arch)"
-        curl -fsSL -m 180 -o "$tmp/hysteria" "$HVK_CORE_URL_BASE/hysteria-linux-$arch" || hvk_die 'download failed'
+need_core=1
+if [[ -f $HVK_CORE_BIN ]]; then
+    if (( repair )) && "$HVK_CORE_BIN" version > /dev/null 2>&1; then
+        need_core=0
     fi
-    actual=$(sha256sum "$tmp/hysteria" | cut -d' ' -f1)
-    [[ $actual == "$(hvk_expected_sha "$arch")" ]] || hvk_die "sha256 mismatch for the core binary: $actual"
-    install -m 755 "$tmp/hysteria" "$HVK_CORE_BIN"
-    "$HVK_CORE_BIN" version > /dev/null 2>&1 || hvk_die 'the core binary does not run on this host'
+fi
+
+if (( need_core )); then
+    if [[ $no_service == 1 ]]; then
+        if [[ -n $binary ]]; then install -m 755 "$binary" "$HVK_CORE_BIN"; else printf '#!/bin/sh\nexit 0\n' > "$HVK_CORE_BIN"; chmod 755 "$HVK_CORE_BIN"; fi
+    else
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        if [[ -n $binary ]]; then
+            cp "$binary" "$tmp/hysteria"
+        else
+            hvk_log "Downloading Hysteria2 v$HVK_CORE_VERSION ($arch)"
+            curl -fsSL -m 180 -o "$tmp/hysteria" "$HVK_CORE_URL_BASE/hysteria-linux-$arch" || hvk_die 'download failed'
+        fi
+        actual=$(sha256sum "$tmp/hysteria" | cut -d' ' -f1)
+        [[ $actual == "$(hvk_expected_sha "$arch")" ]] || hvk_die "sha256 mismatch for the core binary: $actual"
+        install -m 755 "$tmp/hysteria" "$HVK_CORE_BIN"
+        "$HVK_CORE_BIN" version > /dev/null 2>&1 || hvk_die 'the core binary does not run on this host'
+        rm -rf "$tmp"
+        trap - EXIT
+    fi
 fi
 
 # --- identity and certificate ---
+user_created=true
 if [[ $no_service == 0 ]]; then
-    id "$HVK_USER" > /dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$HVK_USER"
+    if id "$HVK_USER" > /dev/null 2>&1; then
+        if (( repair )); then
+            user_created=$(jq -r '.created_resources.user // false' "$HVK_STATE" 2>/dev/null || echo false)
+        else
+            user_created=false
+        fi
+    else
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$HVK_USER"
+        user_created=true
+    fi
     chown "root:$HVK_USER" "$HVK_ETC"
 fi
-openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
-    -subj "/CN=$sni" -keyout "$HVK_KEY" -out "$HVK_CERT" 2> /dev/null
+
+need_cert=1
+if (( repair )) && [[ -s $HVK_KEY && -s $HVK_CERT ]]; then
+    if openssl x509 -in "$HVK_CERT" -noout > /dev/null 2>&1; then
+        need_cert=0
+    fi
+fi
+
+if (( need_cert )); then
+    old_umask=$(umask)
+    umask 077
+    openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
+        -subj "/CN=$sni" -keyout "$HVK_KEY" -out "$HVK_CERT" 2> /dev/null
+    umask "$old_umask"
+fi
 chmod 640 "$HVK_KEY" "$HVK_CERT"
 [[ $no_service == 1 ]] || chown "root:$HVK_USER" "$HVK_KEY" "$HVK_CERT"
 pin=$(hvk_pin "$HVK_CERT")
 
-if [[ -z $endpoint ]]; then endpoint=$(hvk_detect_endpoint); fi
-[[ -n $endpoint ]] || { endpoint=YOUR_SERVER_IP; hvk_log 'could not detect the public address; set it with --endpoint (state.json "endpoint")'; }
+if [[ -z $endpoint ]]; then endpoint=$(hvk_detect_endpoint || true); fi
+if [[ -z $endpoint ]]; then
+    local_ip=""
+    if command -v ip > /dev/null 2>&1; then
+        local_ip=$(ip -4 route get 1.1.1.1 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
+    fi
+    if [[ -n $local_ip ]] && hvk_is_private_ip "$local_ip"; then
+        hvk_log "warning: detected local IP $local_ip is in a private network (behind NAT); clients outside this LAN cannot reach it directly"
+    fi
+    endpoint=YOUR_SERVER_IP
+    hvk_log 'could not confirm public address; set it with --endpoint (state.json "endpoint")'
+fi
 
 # --- state ---
-obfs_password=''
-[[ $obfs == false ]] || obfs_password=$(hvk_rand 28)
-jq -n --arg version "$(hvk_project_version "$project")" --arg core "$HVK_CORE_VERSION" --argjson port "$port" --arg sni "$sni" \
-    --arg endpoint "$endpoint" --arg pin "$pin" --argjson obfs_enabled "$obfs" --arg obfs_password "$obfs_password" \
-    '{version: $version, core: $core, port: $port, sni: $sni, endpoint: $endpoint, pin: $pin,
-      obfs: {enabled: $obfs_enabled, password: $obfs_password}, firewall: "none", clients: {}}' > "$HVK_STATE"
-chmod 600 "$HVK_STATE"
-if (( create_client )); then
-    hvk_state_update '.clients[$n] = $p' --arg n "$first_client" --arg p "$(hvk_rand 28)"
+fw_created=false
+firewall="none"
+if [[ $no_service == 0 ]] && command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q '^Status: active'; then
+    firewall="ufw"
+    if ufw status 2> /dev/null | grep -q "^$port/udp"; then
+        if (( repair )); then
+            fw_created=$(jq -r '.created_resources.firewall_rule // false' "$HVK_STATE" 2>/dev/null || echo false)
+        else
+            fw_created=false
+        fi
+    else
+        ufw allow "$port/udp" comment hysteria-vps-kit > /dev/null
+        hvk_log "ufw: opened $port/udp"
+        fw_created=true
+    fi
+fi
+
+if (( repair )); then
+    obfs_password=$(jq -r '.obfs.password // ""' "$HVK_STATE")
+    hvk_state_update '
+        .status = "installing" |
+        .core = $core |
+        .pin = $pin |
+        .created_resources = {user: $user_created, firewall_rule: $fw_created}
+    ' --arg core "$HVK_CORE_VERSION" --arg pin "$pin" \
+      --argjson user_created "$user_created" --argjson fw_created "$fw_created"
+else
+    obfs_password=''
+    [[ $obfs == false ]] || obfs_password=$(hvk_rand 28)
+    old_umask=$(umask)
+    umask 077
+    jq -n --arg version "$(hvk_project_version "$project")" --arg core "$HVK_CORE_VERSION" --argjson port "$port" --arg sni "$sni" \
+        --arg endpoint "$endpoint" --arg pin "$pin" --argjson obfs_enabled "$obfs" --arg obfs_password "$obfs_password" \
+        --arg firewall "$firewall" --argjson user_created "$user_created" --argjson fw_created "$fw_created" \
+        '{version: $version, core: $core, status: "installing", port: $port, sni: $sni, endpoint: $endpoint, pin: $pin,
+          obfs: {enabled: $obfs_enabled, password: $obfs_password}, firewall: $firewall,
+          created_resources: {user: $user_created, firewall_rule: $fw_created}, clients: {}}' > "$HVK_STATE"
+    umask "$old_umask"
+    chmod 600 "$HVK_STATE"
+    if (( create_client )); then
+        hvk_state_update '.clients[$n] = $p' --arg n "$first_client" --arg p "$(hvk_rand 28)"
+    fi
 fi
 hvk_render_config
 [[ $no_service == 0 ]] || hvk_ensure_sysctl || true
 
-# --- command link, unit, firewall ---
+# --- command link, unit, service ---
 chmod +x "$project/hy2-client" "$project/update.sh" "$project/uninstall.sh"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
 if [[ $no_service == 0 ]]; then
-    cat > "$HVK_UNIT" << EOF
-[Unit]
-Description=Hysteria2 server (hysteria-vps-kit)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=$HVK_USER
-ExecStart=$HVK_CORE_BIN server -c $HVK_CONFIG
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    if command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q '^Status: active'; then
-        ufw allow "$port/udp" comment hysteria-vps-kit > /dev/null
-        hvk_state_update '.firewall = "ufw"'
-        hvk_log "ufw: opened $port/udp"
-    fi
+    hvk_install_unit
     hvk_ensure_sysctl || true
     systemctl daemon-reload
     systemctl enable --now "$HVK_SERVICE" > /dev/null 2>&1
@@ -192,6 +275,7 @@ EOF
     systemctl is-active --quiet "$HVK_SERVICE" || hvk_die "service did not start: journalctl -u $HVK_SERVICE -n 30"
     hvk_udp_port_busy "$port" || hvk_log "warning: nothing is listening on $port/udp yet"
 fi
+hvk_state_update '.status = "ready"'
 
 hvk_log "Hysteria2 v$HVK_CORE_VERSION installed: UDP $port, SNI $sni, endpoint $endpoint"
 [[ $no_service == 1 ]] || hvk_log "Check the provider firewall too: UDP $port must be reachable."

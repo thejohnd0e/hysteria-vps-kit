@@ -40,23 +40,42 @@ case $cmd in
         ;;
     add)
         hvk_require_root; hvk_require_state
+        hvk_lock
         name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
         hvk_valid_name "$name" || hvk_die "invalid name: $name (letters, digits, _ . @ -, up to 32, start with a letter or digit)"
-        [[ $(jq -r --arg n "$name" '.clients | has($n)' "$HVK_STATE") == false ]] || hvk_die "client already exists: $name"
+        if hvk_client_name_conflict "$name"; then
+            hvk_die "client already exists (case-insensitive conflict): $name"
+        fi
+        state_bak=$(mktemp "$HVK_ETC/.state.bak.XXXXXX")
+        config_bak=$(mktemp "$HVK_ETC/.config.bak.XXXXXX")
+        cp -pf "$HVK_STATE" "$state_bak"
+        cp -pf "$HVK_CONFIG" "$config_bak"
         hvk_state_update '.clients[$n] = $p' --arg n "$name" --arg p "$(hvk_rand 28)"
         hvk_render_config
-        hvk_restart_service
+        if ! hvk_restart_service; then
+            cp -pf "$state_bak" "$HVK_STATE"
+            cp -pf "$config_bak" "$HVK_CONFIG"
+            rm -f "$state_bak" "$config_bak"
+            hvk_restart_service || true
+            hvk_die "failed to add client '$name': service did not start; restored previous configuration"
+        fi
+        rm -f "$state_bak" "$config_bak"
         printf 'Client %s\nURI:\n' "$name"
         hvk_client_uri "$name"
         ;;
     remove)
         hvk_require_root; hvk_require_state
+        hvk_lock
         name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
-        [[ $(jq -r --arg n "$name" '.clients | has($n)' "$HVK_STATE") == true ]] || hvk_die "no such client: $name"
-        hvk_state_update 'del(.clients[$n])' --arg n "$name"
+        actual_name=$(jq -r --arg n "$name" '.clients | keys[] | select(. == $n)' "$HVK_STATE" 2>/dev/null || true)
+        [[ -n $actual_name ]] || hvk_die "no such client: $name"
+        hvk_state_update 'del(.clients[$n])' --arg n "$actual_name"
         hvk_render_config
-        hvk_restart_service
-        hvk_log "removed $name"
+        if ! hvk_restart_service; then
+            [[ -n $HVK_ROOT ]] || systemctl stop "$HVK_SERVICE" > /dev/null 2>&1 || true
+            hvk_die "CRITICAL: client '$actual_name' was revoked, but the service failed to restart. To prevent restoring revoked access, the service was stopped. Check logs: journalctl -u $HVK_SERVICE -n 30"
+        fi
+        hvk_log "removed $actual_name"
         ;;
     show)
         hvk_require_state

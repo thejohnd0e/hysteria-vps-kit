@@ -26,6 +26,10 @@ for arg in "$@"; do
     esac
 done
 
+if (( ! check )); then
+    hvk_lock
+fi
+
 old_kit=$(hvk_state_get .version)
 old_core=$(hvk_state_get .core)
 
@@ -45,23 +49,70 @@ if [[ $old_kit == "$new_kit" && $old_core == "$HVK_CORE_VERSION" ]]; then
 fi
 if (( check )); then hvk_log "update available: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION"; exit 10; fi
 
+# Prepare backup of consistent bundle
+backup_dir=$(mktemp -d "$HVK_ETC/.backup-update.XXXXXX")
+cleanup_backup() { rm -rf "$backup_dir"; }
+trap cleanup_backup EXIT
+
+cp -pf "$HVK_STATE" "$backup_dir/state.json"
+cp -pf "$HVK_CONFIG" "$backup_dir/config.yaml"
+[[ ! -f $HVK_CORE_BIN ]] || cp -pf "$HVK_CORE_BIN" "$backup_dir/hysteria"
+[[ ! -f $HVK_UNIT ]] || cp -pf "$HVK_UNIT" "$backup_dir/unit"
+
+core_changed=0
+tmp_dl=""
 if [[ $old_core != "$HVK_CORE_VERSION" ]]; then
     arch=$(hvk_arch)
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    tmp_dl=$(mktemp -d)
     hvk_log "Downloading Hysteria2 v$HVK_CORE_VERSION ($arch)"
-    curl -fsSL -m 180 -o "$tmp/hysteria" "$HVK_CORE_URL_BASE/hysteria-linux-$arch" || hvk_die 'download failed'
-    actual=$(sha256sum "$tmp/hysteria" | cut -d' ' -f1)
+    curl -fsSL -m 180 -o "$tmp_dl/hysteria" "$HVK_CORE_URL_BASE/hysteria-linux-$arch" || hvk_die 'download failed'
+    actual=$(sha256sum "$tmp_dl/hysteria" | cut -d' ' -f1)
     [[ $actual == "$(hvk_expected_sha "$arch")" ]] || hvk_die "sha256 mismatch for the core binary: $actual"
-    chmod 755 "$tmp/hysteria"
-    "$tmp/hysteria" version > /dev/null 2>&1 || hvk_die 'the new core binary does not run on this host'
+    chmod 755 "$tmp_dl/hysteria"
+    "$tmp_dl/hysteria" version > /dev/null 2>&1 || hvk_die 'the new core binary does not run on this host'
+    core_changed=1
+fi
+
+rollback_update() {
+    hvk_log "error: update failed; rolling back to previous state..."
+    cp -pf "$backup_dir/state.json" "$HVK_STATE"
+    cp -pf "$backup_dir/config.yaml" "$HVK_CONFIG"
+    if [[ -f $backup_dir/hysteria ]]; then
+        cp -pf "$backup_dir/hysteria" "$HVK_CORE_BIN"
+    fi
+    if [[ -f $backup_dir/unit ]]; then
+        cp -pf "$backup_dir/unit" "$HVK_UNIT"
+        [[ -n $HVK_ROOT ]] || systemctl daemon-reload
+    fi
+    if hvk_restart_service; then
+        hvk_die "update failed: service did not start with new version; previous version was restored successfully"
+    else
+        hvk_die "CRITICAL: update failed AND rollback failed to start the service; check logs: journalctl -u $HVK_SERVICE -n 50"
+    fi
+}
+
+if (( core_changed )); then
     [[ ! -f $HVK_CORE_BIN ]] || cp -p "$HVK_CORE_BIN" "$HVK_CORE_BIN.previous"
-    install -m 755 "$tmp/hysteria" "$HVK_CORE_BIN"
+    install -m 755 "$tmp_dl/hysteria" "$HVK_CORE_BIN"
+    rm -rf "$tmp_dl"
 fi
 
 hvk_ensure_sysctl || true
+hvk_install_unit
 hvk_state_update '.version = $v | .core = $c' --arg v "$new_kit" --arg c "$HVK_CORE_VERSION"
 ln -sfn "$project/hy2-client" "$HVK_LINK"
 hvk_render_config
-hvk_restart_service
-hvk_log "updated: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION (previous core kept as $HVK_CORE_BIN.previous)"
+
+if ! hvk_restart_service; then
+    rollback_update
+fi
+
+# Update succeeded: remove backup directory
+trap - EXIT
+rm -rf "$backup_dir"
+
+if (( core_changed )); then
+    hvk_log "updated: kit $old_kit -> $new_kit, core $old_core -> $HVK_CORE_VERSION (previous core kept as $HVK_CORE_BIN.previous)"
+else
+    hvk_log "updated: kit $old_kit -> $new_kit, core $old_core (no core change)"
+fi

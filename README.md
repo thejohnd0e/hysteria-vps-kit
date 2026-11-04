@@ -36,12 +36,13 @@ Nothing else in your firewall is touched.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--port PORT` | `443` | UDP listen port. If it is busy (AmneziaWG often uses 443/udp) the installer stops and asks for another |
+| `--port PORT` | `443` | UDP listen port. Canonical decimal (1-65535). If busy, the installer stops and asks for another |
 | `--sni DNS` | `www.bing.com` | certificate name and the site the server impersonates for unauthenticated probes |
 | `--first-client NAME` | `main-user` | first identity |
 | `--no-first-client` | | do not create an identity |
-| `--endpoint IPV4/HOST` | detected | address written into client URIs |
+| `--endpoint IPV4/HOST` | detected | address written into client URIs (IPv4 or DNS domain) |
 | `--no-obfs` | | turn Salamander obfuscation off (not recommended) |
+| `--repair` | | resume an incomplete installation without regenerating existing secrets |
 | `--binary FILE` | download | use a local core binary (the SHA-256 is still checked) |
 | `--non-interactive` | | use flags and defaults without questions |
 
@@ -57,9 +58,10 @@ hy2-client remove phone
 hy2-client version
 ```
 
-Names: letters, digits, `_ . @ -`, up to 32, starting with a letter or digit.
-Adding or removing an identity **restarts the service** (Hysteria2 has no hot reload); connected clients notice
-after the QUIC idle timeout and reconnect on their own, measured about 30 seconds of interruption.
+Names: letters, digits, `_ . @ -`, up to 32, starting with a letter or digit. Client names are unique case-insensitively (Hysteria 2 treats userpass names without case distinction).
+
+Modifying operations (`install.sh`, `update.sh`, `uninstall.sh`, `hy2-client add/remove`) hold an exclusive lock (`flock`) to prevent concurrent race conditions.
+Adding an identity rolls back state on service restart failure. Removing an identity enforces a fail-closed policy (if the service fails to restart with the revoked identity removed, the service is stopped rather than silently restoring access). Connected clients notice after the QUIC idle timeout and reconnect on their own, measured about 30 seconds of interruption.
 
 The URI looks like
 `hysteria2://NAME:PASSWORD@HOST:PORT/?sni=...&insecure=1&pinSHA256=...&obfs=salamander&obfs-password=...#NAME`.
@@ -81,8 +83,11 @@ bash /opt/hysteria-vps-kit-src/uninstall.sh          # remove everything; --keep
 ```
 
 An update fast-forwards the clone, downloads a new core if the kit pins one (SHA-256 checked, the old binary
-is kept as `hysteria.previous`), re-renders the config from `state.json` and restarts. Clients, certificate,
-obfuscation password and port are kept.
+is kept as `hysteria.previous`), synchronizes the systemd unit, re-renders the config from `state.json` and restarts.
+If the updated service fails to start, the previous consistent bundle (core, config, state, unit) is automatically restored.
+Clients, certificate, obfuscation password and port are kept.
+
+Uninstall removes project-created resources (tracked in `state.json`). If a system user or firewall rule pre-dated the installation, it is kept. Removing `/etc/sysctl.d/99-hysteria-vps-kit.conf` removes the configuration file; active kernel buffer values remain until reboot or manual reconfiguration.
 
 ## Files
 

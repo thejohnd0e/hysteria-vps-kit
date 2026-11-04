@@ -20,9 +20,27 @@ HVK_LINK=$HVK_ROOT/usr/local/bin/hy2-client
 HVK_UNIT=$HVK_ROOT/etc/systemd/system/hysteria-vps-kit.service
 HVK_SERVICE=hysteria-vps-kit
 HVK_USER=hysteria-vps-kit
+HVK_LOCK=${HVK_ROOT:+${HVK_ROOT}/run/lock/hysteria-vps-kit.lock}
+HVK_LOCK=${HVK_LOCK:-/run/lock/hysteria-vps-kit.lock}
 
 hvk_die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 hvk_log() { printf '[hysteria-vps-kit] %s\n' "$*"; }
+
+hvk_lock() {
+    # If already locked in this process hierarchy (e.g. across exec in update.sh), return success
+    if [[ ${HVK_LOCKED:-} == 1 ]]; then
+        return 0
+    fi
+    local lock_dir
+    lock_dir=$(dirname "$HVK_LOCK")
+    [[ -d $lock_dir ]] || mkdir -p "$lock_dir"
+
+    exec 9>> "$HVK_LOCK"
+    if ! flock -n 9; then
+        hvk_die "another operation is currently in progress (lock $HVK_LOCK is held)"
+    fi
+    export HVK_LOCKED=1
+}
 
 hvk_project_version() { tr -d '[:space:]' < "$1/VERSION"; }
 
@@ -52,7 +70,105 @@ hvk_rand() { # hvk_rand LENGTH -> alphanumeric
 
 hvk_valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,31}$ ]]; }
 
-hvk_valid_port() { [[ $1 =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+hvk_valid_port() {
+    [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+hvk_valid_domain() {
+    local domain=$1
+    [[ -n $domain && ${#domain} -le 253 ]] || return 1
+    [[ $domain != .* && $domain != *..* && $domain != *. ]] || return 1
+    local label last_label=""
+    local old_ifs=$IFS
+    IFS=.
+    # shellcheck disable=SC2086
+    set -- $domain
+    IFS=$old_ifs
+    for label in "$@"; do
+        [[ ${#label} -ge 1 && ${#label} -le 63 ]] || return 1
+        [[ $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+        last_label=$label
+    done
+    # TLD / single label must not be purely numeric (RFC 1123 / RFC 3696)
+    [[ ! $last_label =~ ^[0-9]+$ ]] || return 1
+    return 0
+}
+
+hvk_valid_sni() {
+    hvk_valid_domain "$1"
+}
+
+hvk_valid_ipv4() {
+    local ip=$1
+    [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local o1=${BASH_REMATCH[1]} o2=${BASH_REMATCH[2]} o3=${BASH_REMATCH[3]} o4=${BASH_REMATCH[4]}
+    local octet
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        if [[ $octet =~ ^0[0-9]+ ]] || (( 10#$octet > 255 )); then return 1; fi
+    done
+    return 0
+}
+
+hvk_is_private_ip() {
+    local ip=$1
+    hvk_valid_ipv4 "$ip" || return 1
+    local o1 o2 o3 o4
+    local old_ifs=$IFS
+    IFS=.
+    read -r o1 o2 o3 o4 <<< "$ip"
+    IFS=$old_ifs
+    if (( 10#$o1 == 10 || 10#$o1 == 127 )); then return 0; fi
+    if (( 10#$o1 == 172 && 10#$o2 >= 16 && 10#$o2 <= 31 )); then return 0; fi
+    if (( 10#$o1 == 192 && 10#$o2 == 168 )); then return 0; fi
+    if (( 10#$o1 == 169 && 10#$o2 == 254 )); then return 0; fi
+    if (( 10#$o1 == 100 && 10#$o2 >= 64 && 10#$o2 <= 127 )); then return 0; fi
+    if [[ $ip == "0.0.0.0" || $ip == "255.255.255.255" ]]; then return 0; fi
+    return 1
+}
+
+hvk_valid_endpoint() {
+    local ep=$1
+    [[ $ep == "YOUR_SERVER_IP" ]] && return 0
+    hvk_valid_ipv4 "$ep" || hvk_valid_domain "$ep"
+}
+
+hvk_client_name_conflict() {
+    local name=$1
+    local conflict
+    conflict=$(jq -r --arg n "$name" '
+        .clients // {} | keys[] | select(ascii_downcase == ($n | ascii_downcase))
+    ' "$HVK_STATE" 2> /dev/null || true)
+    [[ -n $conflict ]]
+}
+
+hvk_validate_state() {
+    [[ -f $HVK_STATE ]] || hvk_die "state file missing: $HVK_STATE"
+    [[ -s $HVK_STATE ]] || hvk_die "state file is empty: $HVK_STATE"
+    if ! jq empty "$HVK_STATE" > /dev/null 2>&1; then
+        hvk_die "state file contains invalid JSON: $HVK_STATE"
+    fi
+    local port sni pin obfs_enabled clients_type
+    port=$(jq -r '.port // empty' "$HVK_STATE" 2> /dev/null || true)
+    hvk_valid_port "$port" || hvk_die "state.json has invalid port: $port"
+    sni=$(jq -r '.sni // empty' "$HVK_STATE" 2> /dev/null || true)
+    hvk_valid_sni "$sni" || hvk_die "state.json has invalid sni: $sni"
+    pin=$(jq -r '.pin // empty' "$HVK_STATE" 2> /dev/null || true)
+    [[ $pin =~ ^[0-9a-f]{64}$ ]] || hvk_die "state.json has invalid pin: $pin"
+    obfs_enabled=$(jq -r '
+        if (.obfs | type == "object") and (.obfs | has("enabled")) and (.obfs.enabled | type == "boolean")
+        then .obfs.enabled else "invalid" end
+    ' "$HVK_STATE" 2> /dev/null || echo "invalid")
+    [[ $obfs_enabled == "true" || $obfs_enabled == "false" ]] || hvk_die "state.json has invalid obfs.enabled"
+    clients_type=$(jq -r '.clients | type' "$HVK_STATE" 2> /dev/null || true)
+    [[ $clients_type == "object" ]] || hvk_die "state.json .clients must be an object"
+    local dup_count
+    dup_count=$(jq -r '
+        .clients // {} | keys | map(ascii_downcase) | length - (unique | length)
+    ' "$HVK_STATE" 2> /dev/null || echo 0)
+    if (( dup_count > 0 )); then
+        hvk_die "state.json has case-insensitive client name duplicates; resolve them manually"
+    fi
+}
 
 hvk_state_get() { jq -r "$1" "$HVK_STATE"; }
 
@@ -69,7 +185,52 @@ hvk_state_update() { # hvk_state_update JQ_FILTER [jq args...]
     fi
 }
 
-hvk_require_state() { [[ -f $HVK_STATE ]] || hvk_die "not installed: $HVK_STATE is missing"; }
+hvk_require_state() {
+    [[ -f $HVK_STATE ]] || hvk_die "not installed: $HVK_STATE is missing"
+    hvk_validate_state
+}
+
+hvk_render_unit() { # [target_path]
+    local target=${1:-$HVK_UNIT}
+    cat << EOF > "$target"
+[Unit]
+Description=Hysteria2 server (hysteria-vps-kit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$HVK_USER
+ExecStart=$HVK_CORE_BIN server -c $HVK_CONFIG
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$target"
+}
+
+hvk_install_unit() {
+    local tmp
+    tmp=$(mktemp "${HVK_ROOT:-}/tmp/hysteria-unit.XXXXXX" 2>/dev/null || mktemp "/tmp/hysteria-unit.XXXXXX")
+    hvk_render_unit "$tmp"
+    local changed=0
+    if [[ ! -f $HVK_UNIT ]] || ! cmp -s "$tmp" "$HVK_UNIT"; then
+        install -d -m 755 "$(dirname "$HVK_UNIT")"
+        install -m 644 "$tmp" "$HVK_UNIT"
+        changed=1
+    fi
+    rm -f "$tmp"
+    if (( changed )) && [[ -z $HVK_ROOT ]]; then
+        systemctl daemon-reload
+    fi
+    return 0
+}
 
 hvk_pin() { # SHA-256 of the certificate, lower-case hex, no colons
     openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'
@@ -97,10 +258,16 @@ hvk_render_config() {
 }
 
 hvk_restart_service() {
-    [[ -z $HVK_ROOT ]] || return 0
-    systemctl restart "$HVK_SERVICE"
+    if [[ -n $HVK_ROOT ]]; then
+        if [[ ${HVK_MOCK_RESTART_FAIL:-0} == 1 ]]; then
+            return 1
+        fi
+        return 0
+    fi
+    systemctl restart "$HVK_SERVICE" || return 1
     sleep 1
-    systemctl is-active --quiet "$HVK_SERVICE" || hvk_die "service did not start: journalctl -u $HVK_SERVICE -n 30"
+    systemctl is-active --quiet "$HVK_SERVICE" || return 1
+    return 0
 }
 
 hvk_client_uri() { # hvk_client_uri NAME
@@ -134,10 +301,11 @@ hvk_client_yaml() { # hvk_client_yaml NAME HTTP_LISTEN SOCKS_LISTEN
 hvk_detect_endpoint() {
     local ip
     ip=$(curl -4 -fsS -m 10 https://api.ipify.org 2> /dev/null || true)
-    if [[ -z $ip ]] && command -v ip > /dev/null 2>&1; then
-        ip=$(ip -4 route get 1.1.1.1 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
+    if hvk_valid_ipv4 "$ip" && ! hvk_is_private_ip "$ip"; then
+        printf '%s' "$ip"
+        return 0
     fi
-    printf '%s' "$ip"
+    return 1
 }
 
 hvk_udp_port_busy() { # 0 = a UDP socket already listens on the port
