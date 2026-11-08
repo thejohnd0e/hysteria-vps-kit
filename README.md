@@ -1,4 +1,4 @@
-# Hysteria Vps Kit
+# Hysteria VPS Kit
 
 **English** · [Русский](README.ru.md)
 
