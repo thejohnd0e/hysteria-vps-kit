@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/thejohnd0e/hysteria-vps-kit/master/
 The script puts the kit in `/opt/hysteria-vps-kit-src`, downloads the pinned Hysteria2 core, **verifies its
 SHA-256**, creates a system user, a self-signed certificate (10 years), the state in
 `/etc/hysteria-vps-kit/` and the service `hysteria-vps-kit`, and prints the first client's URI and QR code.
-If `ufw` is active it opens the port (`ufw allow PORT/udp`) and records that, so uninstall closes it again.
+If `ufw` is active it opens the port (`ufw allow PORT/udp`) unless an existing rule already allows it (a rule without protocol or a port range counts), and records that, so uninstall closes it again. An existing rule that denies the port is reported, never changed.
 Nothing else in your firewall is touched.
 
 | Option | Default | Meaning |
@@ -39,7 +39,7 @@ Nothing else in your firewall is touched.
 | `--port PORT` | `443` | UDP listen port. Canonical decimal (1-65535). If busy, the installer stops and asks for another |
 | `--sni DNS` | `www.bing.com` | certificate name and the site the server impersonates for unauthenticated probes |
 | `--first-client NAME` | `main-user` | first identity |
-| `--no-first-client` | | do not create an identity |
+| `--no-first-client` | | do not create an identity; Hysteria2 cannot run without one, so the service stays stopped until `hy2-client add NAME` (the same happens after the last identity is removed) |
 | `--endpoint IPV4/HOST` | detected | address written into client URIs (IPv4 or DNS domain) |
 | `--no-obfs` | | turn Salamander obfuscation off (not recommended) |
 | `--repair` | | resume an incomplete installation without regenerating existing secrets |
@@ -81,7 +81,7 @@ the Docker bridge drops the QUIC handshake.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thejohnd0e/hysteria-vps-kit/master/update.sh | bash   # or: bash /opt/hysteria-vps-kit-src/update.sh
 bash /opt/hysteria-vps-kit-src/update.sh --check     # exit 0 = up to date, 10 = update available
-bash /opt/hysteria-vps-kit-src/uninstall.sh          # remove everything; --keep-config keeps /etc/hysteria-vps-kit; --yes does not ask
+bash /opt/hysteria-vps-kit-src/uninstall.sh          # remove everything; --keep-config keeps /etc/hysteria-vps-kit (restore later with `install.sh --repair`; secrets and clients are kept); --yes does not ask
 ```
 
 An update fast-forwards the clone, downloads a new core if the kit pins one (SHA-256 checked, the old binary
@@ -99,7 +99,7 @@ Uninstall removes project-created resources (tracked in `state.json`). If a syst
 | `/etc/hysteria-vps-kit/config.yaml` | rendered server config; edit `state.json` and run `hy2-client add`/`remove`, not this file |
 | `/etc/hysteria-vps-kit/server.{crt,key}` | self-signed certificate |
 | `/opt/hysteria-vps-kit/hysteria` | pinned core binary |
-| `/etc/sysctl.d/99-hysteria-vps-kit.conf` | raises `net.core.rmem_max`/`wmem_max` to 7.5 MB: with the 208 KB default the kernel dropped QUIC packets under load (seen as stalls with two devices streaming) |
+| `/etc/sysctl.d/99-hysteria-vps-kit.conf` | raises `net.core.rmem_max`/`wmem_max` to at least 7.5 MB (never lowers a larger value already set): with the 208 KB default the kernel dropped QUIC packets under load (seen as stalls with two devices streaming) |
 | `/etc/systemd/system/hysteria-vps-kit.service` | the unit (sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`) |
 
 ## Tests

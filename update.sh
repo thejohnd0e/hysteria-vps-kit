@@ -30,6 +30,9 @@ hvk_require_root
 hvk_require_state
 
 status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
+if [[ $status == "uninstalled" || ! -x $HVK_CORE_BIN ]]; then
+    hvk_die "the installation is not complete (status: $status, core: $HVK_CORE_BIN); run 'bash install.sh --repair' first"
+fi
 if [[ $status == "installing" ]]; then
     hvk_die "incomplete installation detected (status: installing); run 'bash install.sh --repair' to complete it, not update.sh"
 fi
@@ -61,15 +64,10 @@ if (( check )); then
     exit 10
 fi
 
-# Prepare backup of consistent bundle
-backup_dir=$(mktemp -d "$HVK_ETC/.backup-update.XXXXXX")
-cp -pf "$HVK_STATE" "$backup_dir/state.json"
-cp -pf "$HVK_CONFIG" "$backup_dir/config.yaml"
-[[ ! -f $HVK_CORE_BIN ]] || cp -pf "$HVK_CORE_BIN" "$backup_dir/hysteria"
-[[ ! -f $HVK_UNIT ]] || cp -pf "$HVK_UNIT" "$backup_dir/unit"
-
+# Fetch and verify the new core first: a failed download must leave nothing behind.
 core_changed=0
 tmp_dl=""
+trap '[[ -z $tmp_dl ]] || rm -rf "$tmp_dl"' EXIT
 if [[ $old_core != "$HVK_CORE_VERSION" ]]; then
     arch=$(hvk_arch)
     tmp_dl=$(mktemp -d)
@@ -82,11 +80,19 @@ if [[ $old_core != "$HVK_CORE_VERSION" ]]; then
     core_changed=1
 fi
 
+# Prepare backup of consistent bundle
+backup_dir=$(mktemp -d "$HVK_ETC/.backup-update.XXXXXX")
+cp -pf "$HVK_STATE" "$backup_dir/state.json"
+cp -pf "$HVK_CONFIG" "$backup_dir/config.yaml"
+[[ ! -f $HVK_CORE_BIN ]] || cp -pf "$HVK_CORE_BIN" "$backup_dir/hysteria"
+[[ ! -f $HVK_UNIT ]] || cp -pf "$HVK_UNIT" "$backup_dir/unit"
+
 rolled_back=0
 update_succeeded=0
 rollback_update() {
     if (( update_succeeded || rolled_back )); then return; fi
     rolled_back=1
+    [[ -z $tmp_dl ]] || rm -rf "$tmp_dl"
     hvk_log "error: update failed; rolling back to previous state..."
     cp -pf "$backup_dir/state.json" "$HVK_STATE"
     cp -pf "$backup_dir/config.yaml" "$HVK_CONFIG"

@@ -7,8 +7,6 @@ set -euo pipefail
 project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=lib/common.sh
 source "$project/lib/common.sh"
-hvk_require_root
-hvk_lock
 
 keep=0 yes=0
 for arg in "$@"; do
@@ -19,6 +17,8 @@ for arg in "$@"; do
         *) hvk_die "unknown option: $arg" ;;
     esac
 done
+hvk_require_root
+hvk_lock
 [[ -f $HVK_STATE ]] || hvk_die "not installed: $HVK_STATE is missing"
 
 if (( ! yes )) && [[ -t 0 ]]; then
@@ -26,8 +26,10 @@ if (( ! yes )) && [[ -t 0 ]]; then
     [[ $answer == [yY]* ]] || { printf 'aborted\n'; exit 1; }
 fi
 
-port=$(hvk_state_get .port)
-firewall=$(hvk_state_get .firewall)
+# A damaged state.json must not stop the removal: fall back to safe defaults (nothing foreign gets deleted).
+port=$(jq -r '.port // empty' "$HVK_STATE" 2>/dev/null || true)
+firewall=$(jq -r '.firewall // empty' "$HVK_STATE" 2>/dev/null || true)
+hvk_valid_port "$port" || { port=''; firewall=''; }
 del_user=$(jq -r '.created_resources.user // false' "$HVK_STATE" 2>/dev/null || echo false)
 del_fw=$(jq -r '.created_resources.firewall_rule // false' "$HVK_STATE" 2>/dev/null || echo false)
 
@@ -52,7 +54,9 @@ fi
 # remove the command link only if it is ours
 if [[ -L $HVK_LINK && $(readlink -- "$HVK_LINK") == */hy2-client ]]; then rm -f "$HVK_LINK"; fi
 if (( keep )); then
-    hvk_log "kept $HVK_ETC"
+    # Mark the state so install.sh restores the installation (keeping secrets) and update.sh does not report "up to date".
+    ( hvk_state_update '.status = "uninstalled"' ) 2> /dev/null || true
+    hvk_log "kept $HVK_ETC (restore with: install.sh --repair)"
 else
     rm -rf "$HVK_ETC"
 fi

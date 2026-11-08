@@ -61,9 +61,11 @@ hvk_expected_sha() {
 }
 
 hvk_rand() { # hvk_rand LENGTH -> alphanumeric
-    local out=''
+    local out='' chunk tries=0
     while (( ${#out} < $1 )); do
-        out+=$(openssl rand -base64 48 | tr -d '=+/\n')
+        (( ++tries <= 20 )) || hvk_die 'could not generate a random secret (is openssl working?)'
+        chunk=$(openssl rand -base64 48) || hvk_die 'openssl rand failed'
+        out+=$(printf '%s' "$chunk" | tr -d '=+/\n')
     done
     printf '%s' "${out:0:$1}"
 }
@@ -149,6 +151,7 @@ hvk_client_name_conflict() {
 
 hvk_validate_state() {
     [[ -f $HVK_STATE ]] || hvk_die "state file missing: $HVK_STATE"
+    [[ -r $HVK_STATE ]] || hvk_die "cannot read $HVK_STATE (run as root)"
     [[ -s $HVK_STATE ]] || hvk_die "state file is empty: $HVK_STATE"
     if ! jq empty "$HVK_STATE" > /dev/null 2>&1; then
         hvk_die "state file contains invalid JSON: $HVK_STATE"
@@ -163,7 +166,7 @@ hvk_validate_state() {
         hvk_die "state.json has invalid or empty endpoint: $endpoint"
     fi
     status=$(jq -r '.status // empty' "$HVK_STATE" 2> /dev/null || true)
-    if [[ -n $status && $status != "ready" && $status != "installing" && $status != "updating" ]]; then
+    if [[ -n $status && $status != "ready" && $status != "installing" && $status != "updating" && $status != "uninstalled" ]]; then
         hvk_die "state.json has invalid status: $status"
     fi
     port=$(jq -r '.port // empty' "$HVK_STATE" 2> /dev/null || true)
@@ -302,6 +305,12 @@ hvk_restart_service() {
         fi
         return 0
     fi
+    # Hysteria2 refuses to start with an empty userpass list ("empty auth userpass"): with no identities the
+    # service is kept stopped, which is also the safe state after the last identity was revoked.
+    if [[ $(jq -r '.clients | length' "$HVK_STATE" 2> /dev/null || echo 0) == 0 ]]; then
+        systemctl stop "$HVK_SERVICE" > /dev/null 2>&1 || return 1
+        return 0
+    fi
     systemctl restart "$HVK_SERVICE" || return 1
     sleep 1
     systemctl is-active --quiet "$HVK_SERVICE" || return 1
@@ -337,11 +346,21 @@ hvk_client_yaml() { # hvk_client_yaml NAME HTTP_LISTEN SOCKS_LISTEN
 }
 
 hvk_detect_endpoint() {
-    local ip
-    ip=$(curl -4 -fsS -m 10 https://api.ipify.org 2> /dev/null || true)
-    if hvk_valid_ipv4 "$ip" && ! hvk_is_private_ip "$ip"; then
-        printf '%s' "$ip"
-        return 0
+    local ip url
+    for url in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com https://ident.me; do
+        ip=$(curl -4 -fsS -m 8 "$url" 2> /dev/null | tr -d '[:space:]' || true)
+        if hvk_valid_ipv4 "$ip" && ! hvk_is_private_ip "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    # No outside service answered (some hosts cannot reach Cloudflare): use the source address if it is public.
+    if command -v ip > /dev/null 2>&1; then
+        ip=$(ip -4 route get 1.1.1.1 2> /dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')
+        if hvk_valid_ipv4 "$ip" && ! hvk_is_private_ip "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
     fi
     return 1
 }
@@ -355,12 +374,40 @@ hvk_ufw_is_active() {
     ufw status 2>/dev/null | grep '^Status: active' >/dev/null
 }
 
-hvk_ufw_allows_udp() {
-    ufw status 2>/dev/null | awk -v port="$1" '
-        $1 == port "/udp" && $2 == "ALLOW" { found=1 }
-        $1 == port "/udp" && ($2 == "DENY" || $2 == "REJECT") { denied=1 }
-        END { exit !(found && !denied) }
+# Verdict of the first ufw rule that covers PORT/udp for incoming traffic from anywhere:
+# prints allow, deny or none. Understands "N", "N/udp", "A:B/udp", "a,b/udp" and (v6) rows.
+hvk_ufw_udp_rule() {
+    ufw status 2> /dev/null | awk -v port="$1" '
+        function covers(spec,   s, proto, n, i, items, r) {
+            s = spec; proto = ""
+            if (match(s, /\/[a-z]+$/)) { proto = substr(s, RSTART + 1); s = substr(s, 1, RSTART - 1) }
+            if (proto != "" && proto != "udp") return 0
+            n = split(s, items, ",")
+            for (i = 1; i <= n; i++) {
+                if (items[i] ~ /^[0-9]+:[0-9]+$/) {
+                    split(items[i], r, ":")
+                    if (port + 0 >= r[1] + 0 && port + 0 <= r[2] + 0) return 1
+                } else if (items[i] ~ /^[0-9]+$/ && items[i] + 0 == port + 0) return 1
+            }
+            return 0
+        }
+        res == "" {
+            act = 0
+            for (i = 2; i <= NF; i++) if ($i ~ /^(ALLOW|DENY|REJECT|LIMIT)$/) { act = i; break }
+            if (!act) next
+            nxt = act + 1
+            if ($nxt == "OUT") next
+            if ($nxt == "IN") nxt++
+            if ($nxt != "Anywhere") next
+            if (!covers($1)) next
+            res = ($act == "DENY" || $act == "REJECT") ? "deny" : "allow"
+        }
+        END { print (res == "" ? "none" : res) }
     '
+}
+
+hvk_ufw_allows_udp() {
+    [[ $(hvk_ufw_udp_rule "$1") == allow ]]
 }
 
 hvk_sysctl_file_valid() {
@@ -368,20 +415,28 @@ hvk_sysctl_file_valid() {
     awk '
         /^[[:space:]]*net\.core\.rmem_max[[:space:]]*=/ { r = $3 }
         /^[[:space:]]*net\.core\.wmem_max[[:space:]]*=/ { w = $3 }
-        END { exit !(r == "7500000" && w == "7500000") }
+        END { exit !(r ~ /^[0-9]+$/ && w ~ /^[0-9]+$/ && r + 0 >= 7500000 && w + 0 >= 7500000) }
     ' "$1"
 }
 
 HVK_SYSCTL=$HVK_ROOT/etc/sysctl.d/99-hysteria-vps-kit.conf
 
 # Hysteria2 (quic-go) asks for about 7 MB UDP buffers; the kernel default (208 KB) drops packets under
-# load and shows up as stalls. Returns 0 if the file was written or changed, 1 if it was already right.
+# load and shows up as stalls. Never lowers a larger value already in effect.
+# Returns 0 if the file was written or changed, 1 if it was already right.
 hvk_ensure_sysctl() {
-    local want
-    want=$'# hysteria-vps-kit: UDP buffers for QUIC\nnet.core.rmem_max = 7500000\nnet.core.wmem_max = 7500000\n'
-    if [[ -f $HVK_SYSCTL && $(cat "$HVK_SYSCTL") == "${want%$'\n'}" ]]; then return 1; fi
+    local want=7500000 r=0 w=0
+    if [[ -z $HVK_ROOT ]]; then
+        r=$(sysctl -n net.core.rmem_max 2> /dev/null || echo 0)
+        w=$(sysctl -n net.core.wmem_max 2> /dev/null || echo 0)
+        [[ $r =~ ^[0-9]+$ ]] || r=0
+        [[ $w =~ ^[0-9]+$ ]] || w=0
+    fi
+    if hvk_sysctl_file_valid "$HVK_SYSCTL"; then return 1; fi
+    (( r > want )) || r=$want
+    (( w > want )) || w=$want
     install -d -m 755 "$(dirname "$HVK_SYSCTL")"
-    printf '%s' "$want" > "$HVK_SYSCTL"
+    printf '# hysteria-vps-kit: UDP buffers for QUIC\nnet.core.rmem_max = %s\nnet.core.wmem_max = %s\n' "$r" "$w" > "$HVK_SYSCTL"
     if [[ -z $HVK_ROOT ]]; then sysctl -q -p "$HVK_SYSCTL" > /dev/null 2>&1 || hvk_log 'warning: could not apply the UDP buffer sysctl'; fi
     return 0
 }

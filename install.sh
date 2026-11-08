@@ -89,13 +89,17 @@ if [[ -f $HVK_STATE ]]; then
     if ! jq empty "$HVK_STATE" > /dev/null 2>&1; then
         hvk_die "state file contains invalid JSON: $HVK_STATE"
     fi
+    status=$(jq -r '.status // "ready"' "$HVK_STATE")
+    if [[ $status == "uninstalled" ]] && (( ! repair )); then
+        printf '[hysteria-vps-kit] state kept by "uninstall.sh --keep-config" found: restoring the installation (same as --repair)\n'
+        repair=1
+    fi
     if (( repair )); then
         hvk_validate_state
     fi
-    status=$(jq -r '.status // "ready"' "$HVK_STATE")
     if (( ! repair )); then
         if [[ $status == "ready" ]]; then
-            hvk_die "already installed ($HVK_STATE exists); use update.sh, or uninstall.sh first"
+            hvk_die "already installed ($HVK_STATE exists); use update.sh, or uninstall.sh first (if the core or unit are missing, run 'install.sh --repair')"
         else
             hvk_die "incomplete installation detected ($HVK_STATE has status '$status'); run 'install.sh --repair' to complete it, or 'uninstall.sh' to remove it first"
         fi
@@ -253,18 +257,18 @@ fi
 # --- state ---
 fw_created=false
 firewall="none"
-if [[ $no_service == 0 ]] && command -v ufw > /dev/null && ufw status 2> /dev/null | grep -q '^Status: active'; then
+if [[ $no_service == 0 ]] && command -v ufw > /dev/null && hvk_ufw_is_active; then
     firewall="ufw"
-    if ufw status 2> /dev/null | grep -q "^$port/udp"; then
-        if (( repair )); then
-            fw_created=$(jq -r '.created_resources.firewall_rule // false' "$HVK_STATE" 2>/dev/null || echo false)
-        else
-            fw_created=false
-        fi
-    else
+    rule=$(hvk_ufw_udp_rule "$port")
+    if [[ $rule == none ]]; then
         ufw allow "$port/udp" comment hysteria-vps-kit > /dev/null
         hvk_log "ufw: opened $port/udp"
         fw_created=true
+    else
+        [[ $rule != deny ]] || hvk_log "warning: a ufw rule denies $port/udp; the kit does not change existing rules, fix it by hand"
+        if (( repair )); then
+            fw_created=$(jq -r '.created_resources.firewall_rule // false' "$HVK_STATE" 2>/dev/null || echo false)
+        fi
     fi
 fi
 
@@ -280,18 +284,20 @@ if (( repair )); then
 else
     obfs_password=''
     [[ $obfs == false ]] || obfs_password=$(hvk_rand 28)
+    first_password=''
+    if (( create_client )); then first_password=$(hvk_rand 28); fi
     old_umask=$(umask)
     umask 077
-    jq -n --arg version "$(hvk_project_version "$project")" --arg core "$HVK_CORE_VERSION" --argjson port "$port" --arg sni "$sni" \
-        --arg endpoint "$endpoint" --arg pin "$pin" --argjson obfs_enabled "$obfs" --arg obfs_password "$obfs_password" \
+    OBFS_PASSWORD=$obfs_password jq -n --arg version "$(hvk_project_version "$project")" --arg core "$HVK_CORE_VERSION" --argjson port "$port" --arg sni "$sni" \
+        --arg endpoint "$endpoint" --arg pin "$pin" --argjson obfs_enabled "$obfs" \
         --arg firewall "$firewall" --argjson user_created "$user_created" --argjson fw_created "$fw_created" \
         '{version: $version, core: $core, status: "installing", port: $port, sni: $sni, endpoint: $endpoint, pin: $pin,
-          obfs: {enabled: $obfs_enabled, password: $obfs_password}, firewall: $firewall,
+          obfs: {enabled: $obfs_enabled, password: $ENV.OBFS_PASSWORD}, firewall: $firewall,
           created_resources: {user: $user_created, firewall_rule: $fw_created}, clients: {}}' > "$HVK_STATE"
     umask "$old_umask"
     chmod 600 "$HVK_STATE"
     if (( create_client )); then
-        hvk_state_update '.clients[$n] = $p' --arg n "$first_client" --arg p "$(hvk_rand 28)"
+        CLIENT_PASSWORD=$first_password hvk_state_update '.clients[$n] = $ENV.CLIENT_PASSWORD' --arg n "$first_client"
     fi
 fi
 hvk_render_config
@@ -304,10 +310,15 @@ hvk_install_unit
 if [[ $no_service == 0 ]]; then
     systemctl daemon-reload
     systemctl enable "$HVK_SERVICE" > /dev/null 2>&1 || true
-    systemctl restart "$HVK_SERVICE"
-    sleep 2
-    systemctl is-active --quiet "$HVK_SERVICE" || hvk_die "service did not start: journalctl -u $HVK_SERVICE -n 30"
-    hvk_udp_port_busy "$port" || hvk_log "warning: nothing is listening on $port/udp yet"
+    if [[ $(jq -r '.clients | length' "$HVK_STATE") == 0 ]]; then
+        hvk_restart_service || hvk_die "could not stop the service: journalctl -u $HVK_SERVICE -n 30"
+        hvk_log "no identities yet: Hysteria2 cannot run without one, the service stays stopped until 'hy2-client add NAME'"
+    else
+        systemctl restart "$HVK_SERVICE"
+        sleep 2
+        systemctl is-active --quiet "$HVK_SERVICE" || hvk_die "service did not start: journalctl -u $HVK_SERVICE -n 30"
+        hvk_udp_port_busy "$port" || hvk_log "warning: nothing is listening on $port/udp yet"
+    fi
 fi
 hvk_state_update '.status = "ready"'
 

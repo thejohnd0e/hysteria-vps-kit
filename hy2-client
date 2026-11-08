@@ -98,6 +98,9 @@ doctor() {
         fi
     fi
 
+    local no_clients=0
+    if (( state_valid )) && [[ $(jq -r '.clients // {} | length' "$HVK_STATE" 2>/dev/null || echo 1) == 0 ]]; then no_clients=1; fi
+
     # 4. service is-active and is-enabled
     if [[ -n $HVK_ROOT ]]; then
         report_skip "service status (sandbox mode)"
@@ -109,6 +112,8 @@ doctor() {
         [[ -n $is_enb ]] || is_enb="disabled"
         if [[ $is_act == "active" && $is_enb == "enabled" ]]; then
             report_ok "service is active and enabled"
+        elif (( no_clients )) && [[ $is_act != "active" && $is_enb == "enabled" ]]; then
+            report_warn "service is stopped because there are no identities (Hysteria2 cannot run without one)"
         else
             report_fail "service status: active=$is_act, enabled=$is_enb"
         fi
@@ -189,6 +194,8 @@ doctor() {
     else
         if ss -ulnH "sport = :$port" 2>/dev/null | grep -q ":$port\b"; then
             report_ok "port: UDP port $port is listening"
+        elif (( no_clients )); then
+            report_warn "port: UDP port $port is not listening (no identities)"
         else
             report_fail "port: UDP port $port is not listening"
         fi
@@ -198,7 +205,7 @@ doctor() {
     if [[ -n $HVK_ROOT ]]; then
         report_skip "sysctl buffers (sandbox mode)"
     else
-        local cur_rmem cur_wmem sysctl_file="/etc/sysctl.d/99-hysteria-vps-kit.conf"
+        local cur_rmem cur_wmem sysctl_file=$HVK_SYSCTL
         cur_rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)
         cur_wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)
         [[ $cur_rmem =~ ^[0-9]+$ ]] || cur_rmem=0
@@ -228,11 +235,11 @@ doctor() {
         local fw_state
         fw_state=$(jq -r '.firewall // empty' "$HVK_STATE" 2>/dev/null || true)
         if command -v ufw >/dev/null 2>&1 && hvk_ufw_is_active; then
-            if hvk_ufw_allows_udp "$port"; then
-                report_ok "firewall: ufw is active and allows UDP port $port"
-            else
-                report_warn "firewall: ufw is active but no rule allows UDP port $port"
-            fi
+            case $(hvk_ufw_udp_rule "$port") in
+                allow) report_ok "firewall: ufw is active and allows UDP port $port" ;;
+                deny) report_fail "firewall: ufw is active and a rule denies UDP port $port" ;;
+                *) report_warn "firewall: ufw is active but no rule allows UDP port $port" ;;
+            esac
         else
             if [[ $fw_state == "ufw" ]]; then
                 report_warn "firewall: state records firewall=ufw but ufw is not active"
@@ -303,7 +310,8 @@ case $cmd in
             fi
         }
 
-        hvk_state_update '.clients[$n] = $p' --arg n "$name" --arg p "$(hvk_rand 28)" || rollback_add
+        new_password=$(hvk_rand 28)
+        CLIENT_PASSWORD=$new_password hvk_state_update '.clients[$n] = $ENV.CLIENT_PASSWORD' --arg n "$name" || rollback_add
         hvk_render_config || rollback_add
         if ! hvk_restart_service; then
             rollback_add
@@ -342,6 +350,9 @@ case $cmd in
         trap - EXIT ERR
         cleanup_remove
         hvk_log "removed $actual_name"
+        if [[ $(jq -r '.clients | length' "$HVK_STATE") == 0 ]]; then
+            hvk_log "no identities left: the service is stopped (Hysteria2 cannot run without one); 'hy2-client add NAME' starts it again"
+        fi
         ;;
     show)
         hvk_require_state

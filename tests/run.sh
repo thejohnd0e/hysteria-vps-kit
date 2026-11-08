@@ -288,9 +288,23 @@ suite_uninstall() {
     install_sandbox > /dev/null
     check 'uninstall --keep-config' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --keep-config --yes
     check 'state kept' test -f "$sandbox/etc/hysteria-vps-kit/state.json"
+    check 'state marked uninstalled' test "$(jq -r .status "$sandbox/etc/hysteria-vps-kit/state.json")" = uninstalled
+    local pw_before
+    pw_before=$(jq -r '.clients["main-user"]' "$sandbox/etc/hysteria-vps-kit/state.json")
+    refuse 'update refuses an uninstalled state' env HVK_ROOT="$sandbox" HVK_NO_GIT=1 bash "$project/update.sh" --no-git
+    check 'install after --keep-config restores the installation' install_sandbox
+    check 'restored status is ready' test "$(jq -r .status "$sandbox/etc/hysteria-vps-kit/state.json")" = ready
+    check 'restored install keeps client secrets' test "$(jq -r '.clients["main-user"]' "$sandbox/etc/hysteria-vps-kit/state.json")" = "$pw_before"
+    check 'restored install passes doctor' hy doctor
+    check 'uninstall --keep-config again' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --keep-config --yes
     refuse 'core removed' test -e "$sandbox/opt/hysteria-vps-kit"
     refuse 'command link removed' test -e "$sandbox/usr/local/bin/hy2-client"
     refuse 'sysctl file removed' test -e "$sandbox/etc/sysctl.d/99-hysteria-vps-kit.conf"
+    check 'uninstall --help needs no state' env HVK_ROOT="$sandbox/none" bash "$project/uninstall.sh" --help
+    echo '{broken' > "$sandbox/etc/hysteria-vps-kit/state.json"
+    check 'uninstall works with a damaged state.json' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --yes
+    refuse 'damaged install fully removed' test -e "$sandbox/etc/hysteria-vps-kit"
+    install_sandbox > /dev/null
     check 'full uninstall' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --yes
     refuse 'config dir removed' test -e "$sandbox/etc/hysteria-vps-kit"
     refuse 'uninstall twice' env HVK_ROOT="$sandbox" bash "$project/uninstall.sh" --yes
@@ -369,6 +383,42 @@ EOF
     printf 'net.core.rmem_max = 1\nnet.core.wmem_max = 1\n' > "$sandbox/sysctl.conf"
     # shellcheck disable=SC2016
     refuse 'invalid persistent sysctl is rejected' bash -c 'source "$1/lib/common.sh"; hvk_sysctl_file_valid "$2"' _ "$project" "$sandbox/sysctl.conf"
+    printf 'net.core.rmem_max = 16000000\nnet.core.wmem_max = 16000000\n' > "$sandbox/sysctl.conf"
+    # shellcheck disable=SC2016
+    check 'larger persistent sysctl values are accepted' bash -c 'source "$1/lib/common.sh"; hvk_sysctl_file_valid "$2"' _ "$project" "$sandbox/sysctl.conf"
+    # ufw rule table: first matching incoming rule wins, protocol-less and range rules count
+    ufw_rule() { # ufw_rule PORT -> verdict for the mocked table in $sandbox/mockbin/ufw
+        # shellcheck disable=SC2016
+        env PATH="$sandbox/mockbin:$PATH" bash -c 'source "$1/lib/common.sh"; hvk_ufw_udp_rule "$2"' _ "$project" "$1"
+    }
+    cat > "$sandbox/mockbin/ufw" <<'EOF'
+#!/usr/bin/env bash
+cat <<'TABLE'
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW IN    Anywhere
+47069                      ALLOW IN    Anywhere
+40000:40100/udp            ALLOW IN    Anywhere
+5000,5001/udp              ALLOW IN    Anywhere
+8443/udp                   DENY IN     Anywhere
+8443/udp                   ALLOW IN    Anywhere
+9000/udp                   ALLOW IN    10.0.0.0/8
+7000/udp                   ALLOW OUT   Anywhere
+53/tcp                     ALLOW IN    Anywhere
+443/udp (v6)               ALLOW IN    Anywhere (v6)
+TABLE
+EOF
+    check 'ufw: protocol-less rule allows udp' test "$(ufw_rule 47069)" = allow
+    check 'ufw: port range rule' test "$(ufw_rule 40050)" = allow
+    check 'ufw: port list rule' test "$(ufw_rule 5001)" = allow
+    check 'ufw: first matching rule wins (deny before allow)' test "$(ufw_rule 8443)" = deny
+    check 'ufw: restricted source does not count' test "$(ufw_rule 9000)" = none
+    check 'ufw: outgoing rule does not count' test "$(ufw_rule 7000)" = none
+    check 'ufw: tcp-only rule does not count' test "$(ufw_rule 53)" = none
+    check 'ufw: v6 row is understood' test "$(ufw_rule 443)" = allow
+    check 'ufw: unknown port has no rule' test "$(ufw_rule 12345)" = none
     printf 'net.core.rmem_max = 7500000\nnet.core.wmem_max = 7500000\n' > "$sandbox/sysctl.conf"
     # shellcheck disable=SC2016
     check 'expected persistent sysctl is accepted' bash -c 'source "$1/lib/common.sh"; hvk_sysctl_file_valid "$2"' _ "$project" "$sandbox/sysctl.conf"
