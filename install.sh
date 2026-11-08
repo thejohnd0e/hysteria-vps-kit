@@ -13,12 +13,23 @@ if [[ ! -f ${BASH_SOURCE[0]:-} || ! -f $(dirname -- "${BASH_SOURCE[0]:-/}")/lib/
             printf 'error: bootstrap dependency installation failed\n' >&2; exit 1
         fi
     fi
+    # HVK_REF pins the kit to a tag or commit; without it the newest master is used.
+    ref=${HVK_REF:-}
+    [[ -z $ref ]] || [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ && $ref != *..* ]] || { printf 'error: invalid HVK_REF\n' >&2; exit 1; }
     if [[ -d $src/.git ]]; then
-        git -C "$src" pull --ff-only -q || { printf 'error: cannot fast-forward %s (local changes?)\n' "$src" >&2; exit 1; }
+        if [[ -n $ref ]]; then
+            if ! git -C "$src" fetch -q --tags origin || ! git -C "$src" checkout -q --detach "$ref"; then
+                printf 'error: cannot check out %s in %s\n' "$ref" "$src" >&2; exit 1
+            fi
+        else
+            git -C "$src" symbolic-ref -q HEAD > /dev/null || git -C "$src" checkout -q master || { printf 'error: cannot return %s to master\n' "$src" >&2; exit 1; }
+            git -C "$src" pull --ff-only -q || { printf 'error: cannot fast-forward %s (local changes?)\n' "$src" >&2; exit 1; }
+        fi
     elif [[ -e $src ]]; then
         printf 'error: %s exists but is not a clone of the kit; move it away and run this again\n' "$src" >&2; exit 1
     else
         git clone -q "${HVK_REPO:-https://github.com/thejohnd0e/hysteria-vps-kit.git}" "$src"
+        [[ -z $ref ]] || git -C "$src" checkout -q --detach "$ref" || { printf 'error: cannot check out %s in %s\n' "$ref" "$src" >&2; exit 1; }
     fi
     if [[ -t 0 ]]; then exec bash "$src/install.sh" "$@"; fi
     if { : < /dev/tty; } 2> /dev/null; then exec bash "$src/install.sh" "$@" < /dev/tty; fi

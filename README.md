@@ -84,6 +84,18 @@ bash /opt/hysteria-vps-kit-src/update.sh --check     # exit 0 = up to date, 10 =
 bash /opt/hysteria-vps-kit-src/uninstall.sh          # remove everything; --keep-config keeps /etc/hysteria-vps-kit (restore later with `install.sh --repair`; secrets and clients are kept); --yes does not ask
 ```
 
+**Pinning the kit version.** By default the install and update scripts follow `master`. To stay on a reviewed
+release, set `HVK_REF` to a tag (or commit) for both the first install and every update:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thejohnd0e/hysteria-vps-kit/master/install.sh | HVK_REF=v0.2.3 bash
+HVK_REF=v0.2.4 bash /opt/hysteria-vps-kit-src/update.sh      # moves the clone to that tag
+bash /opt/hysteria-vps-kit-src/update.sh                      # without HVK_REF: back to master
+```
+
+The pinned Hysteria2 core is described in `releases/hysteria.lock.json` (version, URLs, SHA-256 for amd64 and arm64);
+`tools/update-lock.sh VERSION` rewrites it together with the constants in `lib/common.sh`.
+
 An update fast-forwards the clone, downloads a new core if the kit pins one (SHA-256 checked, the old binary
 is kept as `hysteria.previous`), synchronizes the systemd unit, re-renders the config from `state.json` and restarts.
 If the updated service fails to start, the previous consistent bundle (core, config, state, unit) is automatically restored.

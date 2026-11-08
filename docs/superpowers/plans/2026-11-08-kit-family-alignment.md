@@ -43,11 +43,11 @@
 ## Задачи по проектам
 
 ### hysteria-vps-kit
-- [ ] `CHANGELOG.md`, `SECURITY.md`.
-- [ ] Теги релизов и `HVK_REF` (этап C плана 2026-11-08-audit-fixes).
-- [ ] `releases/hysteria.lock.json` вместо SHA-256 в `common.sh`.
+- [x] `CHANGELOG.md`, `SECURITY.md`.
+- [x] Теги релизов и `HVK_REF` (v0.2.3).
+- [x] `releases/hysteria.lock.json` + `tools/update-lock.sh` (константы в `common.sh` остаются, тест сверяет их с lock-файлом, чтобы не требовать jq при bootstrap).
 - [ ] `update.sh --no-restart`.
-- [ ] CI: проверка отрендеренного конфига настоящим ядром.
+- [x] CI: `tests/core-config.sh` (настоящее ядро).
 
 ### xray-vps-kit
 - [ ] Убрать из git `tests/helpers/__pycache__/*.pyc`, добавить `__pycache__/` в `.gitignore`; убрать `аудит.txt` из корня.

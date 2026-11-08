@@ -4,7 +4,7 @@ set -euo pipefail
 project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd -- "$project"
 command -v shellcheck > /dev/null || { printf 'ShellCheck is required for linting\n' >&2; exit 1; }
-files=(install.sh update.sh uninstall.sh hy2-client lib/*.sh tests/*.sh)
+files=(install.sh update.sh uninstall.sh hy2-client lib/*.sh tests/*.sh tools/*.sh)
 for file in "${files[@]}"; do
     bash -n "$file" || { printf 'Syntax error: %s\n' "$file" >&2; exit 1; }
 done

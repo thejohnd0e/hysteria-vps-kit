@@ -45,12 +45,35 @@ old_kit=$(hvk_state_get .version)
 old_core=$(hvk_state_get .core)
 old_status=$(jq -r '.status // "ready"' "$HVK_STATE" 2>/dev/null || echo "ready")
 
+# HVK_REF pins the kit to a tag or commit; without it the clone follows master.
+ref=${HVK_REF:-}
+if [[ -n $ref ]]; then
+    [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ && $ref != *..* ]] || hvk_die 'invalid HVK_REF'
+fi
 if (( ! no_git )) && [[ -d $project/.git ]]; then
-    git -C "$project" fetch -q origin
-    if [[ $(git -C "$project" rev-parse HEAD) != "$(git -C "$project" rev-parse '@{u}')" ]]; then
-        if (( check )); then hvk_log "update available (kit $old_kit)"; exit 10; fi
-        git -C "$project" pull --ff-only -q || hvk_die 'cannot fast-forward the clone (local changes?)'
-        exec bash "$project/update.sh"
+    git -C "$project" fetch -q --tags origin || hvk_die 'cannot fetch the kit repository'
+    if [[ -n $ref ]]; then
+        target=$(git -C "$project" rev-parse -q --verify "$ref^{commit}" 2> /dev/null || git -C "$project" rev-parse -q --verify "origin/$ref^{commit}" 2> /dev/null) \
+            || hvk_die "HVK_REF $ref is not a known tag, branch or commit"
+        if [[ $(git -C "$project" rev-parse HEAD) != "$target" ]]; then
+            if (( check )); then hvk_log "update available (kit $old_kit, pinned to $ref)"; exit 10; fi
+            git -C "$project" checkout -q --detach "$target" || hvk_die "cannot check out $ref (local changes?)"
+            exec bash "$project/update.sh"
+        fi
+    else
+        git -C "$project" symbolic-ref -q HEAD > /dev/null || {
+            (( check )) || git -C "$project" checkout -q master || hvk_die 'cannot return the clone to master'
+        }
+        if git -C "$project" symbolic-ref -q HEAD > /dev/null; then
+            if [[ $(git -C "$project" rev-parse HEAD) != "$(git -C "$project" rev-parse '@{u}')" ]]; then
+                if (( check )); then hvk_log "update available (kit $old_kit)"; exit 10; fi
+                git -C "$project" pull --ff-only -q || hvk_die 'cannot fast-forward the clone (local changes?)'
+                exec bash "$project/update.sh"
+            fi
+        else
+            hvk_log 'the clone is on a pinned commit; run without --check (or set HVK_REF) to move it'
+            exit 10
+        fi
     fi
 fi
 

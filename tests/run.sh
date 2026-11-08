@@ -24,9 +24,19 @@ new_root() { sandbox=$(mktemp -d); }
 install_sandbox() { bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --endpoint 203.0.113.7 "$@"; }
 hy() { HVK_ROOT=$sandbox bash "$project/hy2-client" "$@"; }
 
+lock_matches() { # the lock file and the constants in lib/common.sh must describe the same core
+    # shellcheck source=lib/common.sh
+    ( source "$project/lib/common.sh"
+      jq -e --arg v "v$HVK_CORE_VERSION" --arg base "$HVK_CORE_URL_BASE" --arg a "$HVK_SHA256_AMD64" --arg r "$HVK_SHA256_ARM64" '
+          .version == $v and .assets.amd64.sha256 == $a and .assets.arm64.sha256 == $r
+          and .assets.amd64.url == ($base + "/hysteria-linux-amd64") and .assets.arm64.url == ($base + "/hysteria-linux-arm64")
+      ' "$project/releases/hysteria.lock.json" > /dev/null )
+}
+
 suite_validation() {
     printf 'suite: validation\n'
     new_root
+    check 'releases/hysteria.lock.json matches the pinned core in lib/common.sh' lock_matches
     refuse 'rejects a bad port' install_sandbox --port 70000
     refuse 'rejects port with leading zero 08' install_sandbox --port 08
     refuse 'rejects port with leading zero 00443' install_sandbox --port 00443
@@ -426,7 +436,46 @@ EOF
     rm -rf "$sandbox"
 }
 
-suites=(validation install render clients locking repair update uninstall doctor)
+suite_ref() {
+    printf 'suite: ref\n'
+    command -v git > /dev/null || { ok 'git missing: ref suite skipped'; return 0; }
+    local o src seed g tag1 tag2
+    o=$(mktemp -d); seed=$o/origin; mkdir -p "$seed"
+    g=(git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false -C "$seed")
+    git -C "$project" ls-files -z | tar --null -T - -cf - | tar -xf - -C "$seed"
+    "${g[@]}" init -q -b master && "${g[@]}" add -A && "${g[@]}" commit -q -m one && "${g[@]}" tag t1
+    printf '9.9.9\n' > "$seed/VERSION"
+    "${g[@]}" commit -q -a -m two && "${g[@]}" tag t2
+    tag1=$("${g[@]}" rev-parse t1); tag2=$("${g[@]}" rev-parse t2)
+    local want_old
+    want_old=$(git -C "$seed" show t1:VERSION | tr -d '[:space:]')
+
+    # shellcheck disable=SC2329  # called through check/refuse
+    bootstrap() { # bootstrap SRC [REF]: install.sh piped into bash, like curl | bash
+        HVK_SRC=$1 HVK_REPO="file://$seed" HVK_REF=${2:-} bash -s -- --no-service --root "$sandbox" --non-interactive --endpoint 203.0.113.7 < "$project/install.sh"
+    }
+    src=$o/src
+    new_root
+    check 'bootstrap with HVK_REF installs the pinned tag' bootstrap "$src" t1
+    check 'clone is on the pinned commit' test "$(git -C "$src" rev-parse HEAD)" = "$tag1"
+    check 'installed kit version comes from the pinned tag' test "$(jq -r .version "$sandbox/etc/hysteria-vps-kit/state.json")" = "$want_old"
+    refuse 'update.sh --check reports the pin when behind it' env HVK_ROOT="$sandbox" HVK_REF=t2 bash "$src/update.sh" --check
+    check 'update.sh with HVK_REF moves the clone to the new tag' env HVK_ROOT="$sandbox" HVK_REF=t2 bash "$src/update.sh"
+    check 'clone follows the new tag' test "$(git -C "$src" rev-parse HEAD)" = "$tag2"
+    check 'state has the new kit version' test "$(jq -r .version "$sandbox/etc/hysteria-vps-kit/state.json")" = 9.9.9
+    check 'update.sh --check is clean at the pin' env HVK_ROOT="$sandbox" HVK_REF=t2 bash "$src/update.sh" --check
+    refuse 'unknown HVK_REF is refused' env HVK_ROOT="$sandbox" HVK_REF=nope bash "$src/update.sh" --check
+    refuse 'malformed HVK_REF is refused' env HVK_ROOT="$sandbox" 'HVK_REF=a..b' bash "$src/update.sh" --check
+    refuse 'malformed HVK_REF is refused by the bootstrap' bootstrap "$o/src-bad" 'x;y'
+    check 'update.sh without HVK_REF returns the clone to master' env HVK_ROOT="$sandbox" bash "$src/update.sh"
+    check 'clone is back on a branch' git -C "$src" symbolic-ref -q HEAD
+    rm -rf "$sandbox"; new_root
+    check 'bootstrap without HVK_REF installs master' bootstrap "$o/src2"
+    check 'master carries the newest version' test "$(jq -r .version "$sandbox/etc/hysteria-vps-kit/state.json")" = 9.9.9
+    rm -rf "$sandbox" "$o"
+}
+
+suites=(validation install render clients locking repair update uninstall doctor ref)
 if [[ ${1:-} == --suite ]]; then suites=("${2:?--suite needs a name}"); fi
 for suite in "${suites[@]}"; do
     declare -F "suite_$suite" > /dev/null || { printf 'error: unknown suite: %s\n' "$suite" >&2; exit 2; }

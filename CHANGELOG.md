@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.2.3 - unreleased
+## 0.2.3 - 2026-11-08
+- `HVK_REF` pins the kit to a tag or commit for `install.sh` (bootstrap) and `update.sh`; `update.sh` can move
+  the clone between tags and back to `master`.
+- `releases/hysteria.lock.json` describes the pinned core; `tools/update-lock.sh VERSION` updates it and
+  `lib/common.sh` from the official `hashes.txt`; a test keeps both in sync.
 - Client names may no longer contain a dot: the core splits `userpass` keys on dots, so `user.name` or an
   e-mail address produced a config it refuses to load (found by the new real-core test). `doctor` reports
   existing names with dots as a failure.

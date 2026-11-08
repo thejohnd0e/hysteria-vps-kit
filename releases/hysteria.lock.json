@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "v2.13.0",
+  "assets": {
+    "amd64": {
+      "name": "hysteria-linux-amd64",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-linux-amd64",
+      "sha256": "907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691"
+    },
+    "arm64": {
+      "name": "hysteria-linux-arm64",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-linux-arm64",
+      "sha256": "a68a61a84452ca250ce0368202521965ca9cc9d801a404f1dc9008ac6cf677a7"
+    }
+  }
+}
