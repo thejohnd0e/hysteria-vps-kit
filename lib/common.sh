@@ -70,7 +70,7 @@ hvk_rand() { # hvk_rand LENGTH -> alphanumeric
     printf '%s' "${out:0:$1}"
 }
 
-hvk_valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,31}$ ]]; }
+hvk_valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_@-]{0,31}$ ]]; }
 
 hvk_valid_port() {
     [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))

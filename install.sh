@@ -128,7 +128,7 @@ if [[ -n $endpoint ]]; then
     hvk_valid_endpoint "$endpoint" || hvk_die "invalid endpoint: $endpoint (must be an IPv4 address or DNS domain name)"
 fi
 if (( create_client )); then
-    hvk_valid_name "$first_client" || hvk_die "invalid client name: $first_client (letters, digits, _ . @ -, up to 32, start with a letter or digit)"
+    hvk_valid_name "$first_client" || hvk_die "invalid client name: $first_client (letters, digits, _ @ -, up to 32, start with a letter or digit)"
 fi
 if [[ $no_service == 0 ]] && (( ! repair )) && hvk_udp_port_busy "$port"; then
     hvk_die "UDP port $port is already in use (AmneziaWG often takes 443/udp); choose another with --port"

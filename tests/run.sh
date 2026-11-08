@@ -34,6 +34,7 @@ suite_validation() {
     refuse 'rejects port 65536' install_sandbox --port 65536
     refuse 'rejects negative port' install_sandbox --port -1
     refuse 'rejects a bad sni' install_sandbox --sni 'bad name'
+    refuse 'rejects a dot in the client name (the core splits userpass keys on dots)' install_sandbox --first-client 'user.name'
     refuse 'rejects bad sni ...' install_sandbox --sni '...'
     refuse 'rejects bad sni -foo.com' install_sandbox --sni '-foo.com'
     refuse 'rejects bad sni foo..com' install_sandbox --sni 'foo..com'
@@ -113,28 +114,28 @@ suite_clients() {
     new_root
     install_sandbox --first-client main-user > /dev/null
     check 'list shows the first client' test "$(hy list)" = main-user
-    check 'add' hy add phone.one
+    check 'add' hy add phone_one
     check 'add with @' hy add 'one@us'
-    refuse 'duplicate add' hy add phone.one
+    refuse 'duplicate add' hy add phone_one
     check 'add Alice' hy add Alice
     refuse 'rejects case-insensitive duplicate alice' hy add alice
     refuse 'rejects case-insensitive duplicate ALICE' hy add ALICE
     refuse 'bad name' hy add '@x'
     check 'four clients' test "$(hy list | wc -l)" = 4
     local uri
-    uri=$(hy show phone.one)
+    uri=$(hy show phone_one)
     check 'URI scheme' test "${uri#hysteria2://}" != "$uri"
     check 'URI has obfs' test "${uri#*obfs=salamander}" != "$uri"
     check 'URI has the pin' test "${uri#*pinSHA256=}" != "$uri"
     check 'URI endpoint' test "${uri#*@203.0.113.7:}" != "$uri"
     check '@ in a name is percent-encoded in the URI' test "$(hy show 'one@us' | grep -c '^hysteria2://one%40us:')" = 1
-    check 'yaml has server and auth' test "$(hy show phone.one --yaml | grep -Ec '^(server: 203.0.113.7:443|auth: phone.one:)')" = 2
-    check 'yaml honours --http/--socks' test "$(hy show phone.one --yaml --http 0.0.0.0:9230 --socks 0.0.0.0:8230 | grep -Ec 'listen: 0.0.0.0:(9230|8230)')" = 2
+    check 'yaml has server and auth' test "$(hy show phone_one --yaml | grep -Ec '^(server: 203.0.113.7:443|auth: phone_one:)')" = 2
+    check 'yaml honours --http/--socks' test "$(hy show phone_one --yaml --http 0.0.0.0:9230 --socks 0.0.0.0:8230 | grep -Ec 'listen: 0.0.0.0:(9230|8230)')" = 2
     check 'passwords differ between clients' test "$(jq -r '.clients | [.[]] | unique | length' "$sandbox/etc/hysteria-vps-kit/state.json")" = 4
     check 'config lists every client' test "$(grep -c '^    "' "$sandbox/etc/hysteria-vps-kit/config.yaml")" = 4
-    check 'remove' hy remove phone.one
-    refuse 'remove twice' hy remove phone.one
-    refuse 'show of a removed client' hy show phone.one
+    check 'remove' hy remove phone_one
+    refuse 'remove twice' hy remove phone_one
+    refuse 'show of a removed client' hy show phone_one
     check 'config follows removal' test "$(grep -c '^    "' "$sandbox/etc/hysteria-vps-kit/config.yaml")" = 3
     check 'version prints' hy version
     refuse 'unknown command' hy frobnicate

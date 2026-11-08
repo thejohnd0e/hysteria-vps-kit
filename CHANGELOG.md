@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - unreleased
+- Client names may no longer contain a dot: the core splits `userpass` keys on dots, so `user.name` or an
+  e-mail address produced a config it refuses to load (found by the new real-core test). `doctor` reports
+  existing names with dots as a failure.
+- CI feeds the rendered configs to the real pinned core (`tests/core-config.sh`).
+
 ## 0.2.2 - 2026-11-08
 - `uninstall.sh --keep-config` marks the state `uninstalled`; `install.sh` then restores the installation
   with the same secrets, `update.sh` refuses to run on it.
