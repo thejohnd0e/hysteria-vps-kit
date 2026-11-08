@@ -8,6 +8,19 @@ Why it exists: where inbound TCP from foreign VPS ranges is throttled, a UDP tra
 speed. Measured through one home ISP on 2026-10-26: VLESS/TCP to a VPS gave about 2 Mbit/s, Hysteria2 to the same
 VPS gave 110-170 Mbit/s. That can change at any time; use it as one more channel, not as the only one.
 
+## Part of the VPS kit family
+
+`quality-vps-kit` is one of several independent tools for the same workflow: evaluate a VPS first, then set up VPN/proxy services on it.
+
+| Project | Purpose |
+|---|---|
+| [quality-vps-kit](https://github.com/thejohnd0e/quality-vps-kit) | read-only evaluation of a fresh VPS |
+| [xray-vps-kit](https://github.com/thejohnd0e/xray-vps-kit) | VLESS/Reality server installer and client management |
+| [awg-vps-kit](https://github.com/thejohnd0e/awg-vps-kit) | AmneziaWG server installer and client management |
+| **hysteria-vps-kit** (this repo) | Hysteria2 server installer and client management |
+
+The kits are independent: none of them modifies or requires the others.
+
 ## Requirements
 
 | | Minimum | Notes |
