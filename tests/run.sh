@@ -81,6 +81,7 @@ suite_install() {
     check 'obfs password is 28 chars' test "$(jq -r .obfs.password "$sandbox/etc/hysteria-vps-kit/state.json" | wc -c)" = 29
     check 'config.yaml written' test -s "$sandbox/etc/hysteria-vps-kit/config.yaml"
     check 'certificate written' test -s "$sandbox/etc/hysteria-vps-kit/server.crt"
+    check 'certificate carries a SAN for the SNI' test "$(openssl x509 -in "$sandbox/etc/hysteria-vps-kit/server.crt" -noout -ext subjectAltName 2>/dev/null | grep -c 'DNS:www.bing.com')" = 1
     check 'command link created' test -L "$sandbox/usr/local/bin/hy2-client"
     check 'UDP buffer sysctl written' contains "$sandbox/etc/sysctl.d/99-hysteria-vps-kit.conf" 'net.core.rmem_max = 7500000'
     rm -rf "$sandbox"
@@ -210,13 +211,14 @@ suite_repair() {
     orig_obfs=$(jq -r .obfs.password "$sandbox/etc/hysteria-vps-kit/state.json")
     orig_cert=$(cat "$sandbox/etc/hysteria-vps-kit/server.crt")
 
-    # Mark status as incomplete
-    jq '.status = "installing"' "$sandbox/etc/hysteria-vps-kit/state.json" > "$sandbox/etc/hysteria-vps-kit/state.json.tmp"
+    # Mark status as incomplete and pretend an older kit wrote the state
+    jq '.status = "installing" | .version = "0.0.9"' "$sandbox/etc/hysteria-vps-kit/state.json" > "$sandbox/etc/hysteria-vps-kit/state.json.tmp"
     mv "$sandbox/etc/hysteria-vps-kit/state.json.tmp" "$sandbox/etc/hysteria-vps-kit/state.json"
 
     refuse 'normal install refuses incomplete install' install_sandbox
     check 'install --repair succeeds' bash "$project/install.sh" --no-service --root "$sandbox" --non-interactive --repair
     check 'status is ready after repair' test "$(jq -r .status "$sandbox/etc/hysteria-vps-kit/state.json")" = "ready"
+    check 'repair updates state version to the kit version' test "$(jq -r .version "$sandbox/etc/hysteria-vps-kit/state.json")" = "$(tr -d '[:space:]' < "$project/VERSION")"
     check 'pin preserved after repair' test "$(jq -r .pin "$sandbox/etc/hysteria-vps-kit/state.json")" = "$orig_pin"
     check 'obfs password preserved after repair' test "$(jq -r .obfs.password "$sandbox/etc/hysteria-vps-kit/state.json")" = "$orig_obfs"
     check 'certificate preserved after repair' test "$(cat "$sandbox/etc/hysteria-vps-kit/server.crt")" = "$orig_cert"

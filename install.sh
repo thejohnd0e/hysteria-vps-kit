@@ -16,9 +16,19 @@ if [[ ! -f ${BASH_SOURCE[0]:-} || ! -f $(dirname -- "${BASH_SOURCE[0]:-/}")/lib/
     # HVK_REF pins the kit to a tag or commit; without it the newest master is used.
     ref=${HVK_REF:-}
     [[ -z $ref ]] || [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$ && $ref != *..* ]] || { printf 'error: invalid HVK_REF\n' >&2; exit 1; }
+    # A ref may be a tag or a local branch, but a branch that exists only on the remote resolves as origin/REF.
+    resolve_ref() { # resolve_ref CLONE REF -> prints an existing committish or fails
+        if git -C "$1" rev-parse -q --verify "$2^{commit}" > /dev/null 2>&1; then
+            printf '%s' "$2"
+        elif git -C "$1" rev-parse -q --verify "origin/$2^{commit}" > /dev/null 2>&1; then
+            printf 'origin/%s' "$2"
+        else
+            return 1
+        fi
+    }
     if [[ -d $src/.git ]]; then
         if [[ -n $ref ]]; then
-            if ! git -C "$src" fetch -q --tags origin || ! git -C "$src" checkout -q --detach "$ref"; then
+            if ! git -C "$src" fetch -q --tags origin || ! target_ref=$(resolve_ref "$src" "$ref") || ! git -C "$src" checkout -q --detach "$target_ref"; then
                 printf 'error: cannot check out %s in %s\n' "$ref" "$src" >&2; exit 1
             fi
         else
@@ -29,7 +39,7 @@ if [[ ! -f ${BASH_SOURCE[0]:-} || ! -f $(dirname -- "${BASH_SOURCE[0]:-/}")/lib/
         printf 'error: %s exists but is not a clone of the kit; move it away and run this again\n' "$src" >&2; exit 1
     else
         git clone -q "${HVK_REPO:-https://github.com/thejohnd0e/hysteria-vps-kit.git}" "$src"
-        [[ -z $ref ]] || git -C "$src" checkout -q --detach "$ref" || { printf 'error: cannot check out %s in %s\n' "$ref" "$src" >&2; exit 1; }
+        [[ -z $ref ]] || { target_ref=$(resolve_ref "$src" "$ref") && git -C "$src" checkout -q --detach "$target_ref"; } || { printf 'error: cannot check out %s in %s\n' "$ref" "$src" >&2; exit 1; }
     fi
     if [[ -t 0 ]]; then exec bash "$src/install.sh" "$@"; fi
     if { : < /dev/tty; } 2> /dev/null; then exec bash "$src/install.sh" "$@" < /dev/tty; fi
@@ -241,6 +251,7 @@ if (( need_cert )); then
     old_umask=$(umask)
     umask 077
     openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
+        -addext "subjectAltName=DNS:$sni" \
         -subj "/CN=$sni" -keyout "$HVK_KEY" -out "$HVK_CERT" 2> /dev/null
     umask "$old_umask"
 fi
@@ -287,10 +298,11 @@ if (( repair )); then
     obfs_password=$(jq -r '.obfs.password // ""' "$HVK_STATE")
     hvk_state_update '
         .status = "installing" |
+        .version = $v |
         .core = $core |
         .pin = $pin |
         .created_resources = {user: $user_created, firewall_rule: $fw_created}
-    ' --arg core "$HVK_CORE_VERSION" --arg pin "$pin" \
+    ' --arg v "$(hvk_project_version "$project")" --arg core "$HVK_CORE_VERSION" --arg pin "$pin" \
       --argjson user_created "$user_created" --argjson fw_created "$fw_created"
 else
     obfs_password=''

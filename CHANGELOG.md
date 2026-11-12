@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.4 - 2026-11-12
+- Review fixes (local, uncommitted until rollout):
+- `install.sh --repair` now also updates `state.version`, so a repaired installation no longer looks
+  outdated to `doctor` and `update.sh`.
+- `hy2-client add/remove`: an unexpected failure between the backups and the verified restart now
+  restores them (ERR trap = rollback / fail-closed) instead of only deleting the backups.
+- `install.sh` bootstrap resolves an `HVK_REF` that names a remote branch (`origin/REF`), same as
+  `update.sh`.
+- `update.sh` fails with a clear message when the clone has no upstream branch instead of a confusing
+  "update available"; after a rollback it says that the clone itself stays on the new commit.
+- `hvk_restart_service` waits 2 s (was 1) and verifies that the UDP port is actually listening before
+  reporting success.
+- The self-signed certificate now carries `subjectAltName=DNS:<sni>` in addition to `CN`.
+
 ## 0.2.3 - 2026-11-08
 - `HVK_REF` pins the kit to a tag or commit for `install.sh` (bootstrap) and `update.sh`; `update.sh` can move
   the clone between tags and back to `master`.

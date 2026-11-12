@@ -312,8 +312,17 @@ hvk_restart_service() {
         return 0
     fi
     systemctl restart "$HVK_SERVICE" || return 1
-    sleep 1
+    sleep 2
     systemctl is-active --quiet "$HVK_SERVICE" || return 1
+    # "active" alone does not prove the QUIC listener is up: a runtime failure right after start
+    # can leave the unit active briefly. Verify that the UDP port is actually listening.
+    local port
+    port=$(jq -r '.port // empty' "$HVK_STATE" 2>/dev/null || true)
+    if command -v ss > /dev/null 2>&1 && hvk_valid_port "$port"; then
+        hvk_udp_port_busy "$port" && return 0
+        sleep 2
+        hvk_udp_port_busy "$port" || return 1
+    fi
     return 0
 }
 

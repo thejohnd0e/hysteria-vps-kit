@@ -64,6 +64,9 @@ if (( ! no_git )) && [[ -d $project/.git ]]; then
         git -C "$project" symbolic-ref -q HEAD > /dev/null || {
             (( check )) || git -C "$project" checkout -q master || hvk_die 'cannot return the clone to master'
         }
+        if ! git -C "$project" rev-parse -q --verify '@{u}' > /dev/null 2>&1; then
+            hvk_die 'the clone has no upstream branch; set one (git branch --set-upstream-to=origin/master master) or pin a version with HVK_REF'
+        fi
         if git -C "$project" symbolic-ref -q HEAD > /dev/null; then
             if [[ $(git -C "$project" rev-parse HEAD) != "$(git -C "$project" rev-parse '@{u}')" ]]; then
                 if (( check )); then hvk_log "update available (kit $old_kit)"; exit 10; fi
@@ -127,6 +130,7 @@ rollback_update() {
         [[ -n $HVK_ROOT ]] || systemctl daemon-reload
     fi
     hvk_log "backup preserved at $backup_dir"
+    hvk_log "note: the kit clone was left at the new commit; to move it back, run: git -C $project checkout <previous-commit>"
     if hvk_restart_service; then
         hvk_die "update failed: previous version was restored successfully"
     else

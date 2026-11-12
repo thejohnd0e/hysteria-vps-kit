@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016  # jq filters are meant to stay in single quotes
-set -euo pipefail
+set -euEo pipefail
 # hy2-client: manage Hysteria2 identities of a hysteria-vps-kit server.
 self=$(readlink -f -- "${BASH_SOURCE[0]}")
 project=$(dirname -- "$self")
@@ -300,7 +300,7 @@ case $cmd in
         state_bak=$(mktemp "$HVK_ETC/.state.bak.XXXXXX")
         config_bak=$(mktemp "$HVK_ETC/.config.bak.XXXXXX")
         cleanup_add() { rm -f "$state_bak" "$config_bak"; }
-        trap cleanup_add EXIT ERR
+        trap cleanup_add EXIT
         cp -pf "$HVK_STATE" "$state_bak"
         cp -pf "$HVK_CONFIG" "$config_bak"
 
@@ -315,6 +315,9 @@ case $cmd in
                 hvk_die "CRITICAL: failed to add client '$name' and failed to restore service; check logs: journalctl -u $HVK_SERVICE -n 30"
             fi
         }
+        # An unexpected failure between the backups and the verified restart must restore them,
+        # not just delete them (which would leave a half-applied change).
+        trap rollback_add ERR
 
         new_password=$(hvk_rand 28)
         CLIENT_PASSWORD=$new_password hvk_state_update '.clients[$n] = $ENV.CLIENT_PASSWORD' --arg n "$name" || rollback_add
@@ -337,7 +340,7 @@ case $cmd in
         state_bak=$(mktemp "$HVK_ETC/.state.bak.XXXXXX")
         config_bak=$(mktemp "$HVK_ETC/.config.bak.XXXXXX")
         cleanup_remove() { rm -f "$state_bak" "$config_bak"; }
-        trap cleanup_remove EXIT ERR
+        trap cleanup_remove EXIT
         cp -pf "$HVK_STATE" "$state_bak"
         cp -pf "$HVK_CONFIG" "$config_bak"
 
@@ -347,6 +350,8 @@ case $cmd in
             [[ -n $HVK_ROOT ]] || systemctl stop "$HVK_SERVICE" > /dev/null 2>&1 || true
             hvk_die "CRITICAL: client '$actual_name' was revoked, but applying configuration or restarting the service failed. To prevent restoring revoked access, the service was stopped. Check logs: journalctl -u $HVK_SERVICE -n 30"
         }
+        # An unexpected failure after revocation must stop the service (fail closed), not exit silently.
+        trap fail_closed_remove ERR
 
         hvk_state_update 'del(.clients[$n])' --arg n "$actual_name" || fail_closed_remove
         hvk_render_config || fail_closed_remove
