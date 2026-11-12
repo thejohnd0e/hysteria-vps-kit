@@ -246,6 +246,71 @@ suite_repair() {
     rm -rf "$sandbox"
 }
 
+suite_stagec() {
+    printf 'suite: stagec (rotate/backup/restore/logs)\n'
+    new_root
+    install_sandbox --first-client alice > /dev/null
+    local E=$sandbox/etc/hysteria-vps-kit
+    local pw_before pw_after pin_before
+    pw_before=$(jq -r .clients.alice "$E/state.json")
+    pin_before=$(jq -r .pin "$E/state.json")
+
+    # rotate
+    refuse 'rotate refuses an unknown client' hy rotate nobody
+    hy rotate alice > /dev/null
+    check 'rotate keeps the client name' test "$(hy list)" = alice
+    pw_after=$(jq -r .clients.alice "$E/state.json")
+    check 'rotate changes the password' test "$pw_before" != "$pw_after"
+    check 'rotate password is 28 chars' test "${#pw_after}" = 28
+    local rendered=$sandbox/rendered.yaml
+    check 'config matches state after rotate' bash -c "HVK_ROOT='$sandbox' bash -c \"source '$project/lib/common.sh' && hvk_render_config_to '$rendered'\" && cmp -s '$rendered' '$E/config.yaml'"
+
+    # failed rotate rolls back (mock jq failing on to_entries, as in the render suite)
+    mkdir -p "$sandbox/mockbin"
+    cat > "$sandbox/mockbin/jq" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    [[ $arg != *to_entries* ]] || exit 42
+done
+exec /usr/bin/jq "$@"
+EOF
+    chmod +x "$sandbox/mockbin/jq"
+    local pw_still=$pw_after
+    refuse 'failed rotate rejects the change' env PATH="$sandbox/mockbin:$PATH" HVK_ROOT="$sandbox" bash "$project/hy2-client" rotate alice
+    check 'failed rotate preserves the password' test "$(jq -r .clients.alice "$E/state.json")" = "$pw_still"
+
+    # backup
+    local bk=$sandbox/kit-backup.tgz
+    refuse 'backup refuses a relative path' hy backup relative.tgz
+    hy backup "$bk" > /dev/null
+    check 'backup file is created' test -s "$bk"
+    check 'backup has mode 600' test "$(stat -c %a "$bk")" = 600
+    local members
+    members=$(tar -tzf "$bk")
+    check 'backup contains state.json' grep -qx 'etc/hysteria-vps-kit/state.json' <<< "$members"
+    check 'backup contains the TLS key and cert' bash -c "grep -qx 'etc/hysteria-vps-kit/server.key' <<< \"\$0\" && grep -qx 'etc/hysteria-vps-kit/server.crt' <<< \"\$0\"" "$members"
+    check 'backup contains the unit and sysctl' bash -c "grep -qx 'etc/systemd/system/hysteria-vps-kit.service' <<< \"\$0\" && grep -qx 'etc/sysctl.d/99-hysteria-vps-kit.conf' <<< \"\$0\"" "$members"
+    check 'backup contains the core binary' grep -qx 'opt/hysteria-vps-kit/hysteria' <<< "$members"
+
+    # restore over a damaged installation
+    rm -rf "$sandbox/etc/hysteria-vps-kit"
+    hy restore "$bk" > /dev/null
+    check 'restore recreates state.json' test -s "$E/state.json"
+    check 'restore keeps the client' test "$(hy list)" = alice
+    check 'restore keeps the pin' test "$(jq -r .pin "$E/state.json")" = "$pin_before"
+    check 'restore keeps the rotated password' test "$(jq -r .clients.alice "$E/state.json")" = "$pw_after"
+
+    # restore rejects a foreign tar
+    local notbk=$sandbox/not-a-backup.tgz
+    tar -czf "$notbk" -C "$sandbox" rendered.yaml
+    refuse 'restore rejects a non-kit archive' hy restore "$notbk"
+    refuse 'restore rejects a missing file' hy restore "$sandbox/nope.tgz"
+
+    # logs
+    refuse 'logs refuses in sandbox mode' hy logs
+    rm -rf "$sandbox"
+}
+
 suite_update() {
     printf 'suite: update\n'
     new_root
@@ -477,7 +542,7 @@ suite_ref() {
     rm -rf "$sandbox" "$o"
 }
 
-suites=(validation install render clients locking repair update uninstall doctor ref)
+suites=(validation install render clients locking repair stagec update uninstall doctor ref)
 if [[ ${1:-} == --suite ]]; then suites=("${2:?--suite needs a name}"); fi
 for suite in "${suites[@]}"; do
     declare -F "suite_$suite" > /dev/null || { printf 'error: unknown suite: %s\n' "$suite" >&2; exit 2; }

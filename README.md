@@ -70,14 +70,18 @@ hy2-client list
 hy2-client show phone         # hysteria2:// URI
 hy2-client show phone --qr    # QR code
 hy2-client show phone --yaml --http 0.0.0.0:9230 --socks 0.0.0.0:8230   # client.yaml for the Hysteria2 client
+hy2-client rotate phone       # new password for an identity (re-issue the URI after it)
 hy2-client remove phone
+hy2-client backup             # root-only tarball (state, config, cert/key, unit, sysctl, core)
+hy2-client restore /root/hysteria-vps-kit-backup-....tgz   # extract + repair
+hy2-client logs -n 50         # service journal (also: -f, --since "1 hour ago")
 hy2-client doctor          # read-only diagnostics; exit 1 if a check failed
 hy2-client version
 ```
 
 Names: letters, digits, `_ @ -`, up to 32 (no dot: the core splits userpass keys on dots, so `user.name` would break the config; write `user@example_com`), starting with a letter or digit. Client names are unique case-insensitively (Hysteria 2 treats userpass names without case distinction).
 
-Modifying operations (`install.sh`, `update.sh`, `uninstall.sh`, `hy2-client add/remove`) hold an exclusive lock (`flock`) to prevent concurrent race conditions.
+Modifying operations (`install.sh`, `update.sh`, `uninstall.sh`, `hy2-client add/remove/rotate/backup/restore`) hold an exclusive lock (`flock`) to prevent concurrent race conditions.
 Adding an identity rolls back state on service restart failure. Removing an identity enforces a fail-closed policy (if the service fails to restart with the revoked identity removed, the service is stopped rather than silently restoring access). Connected clients notice after the QUIC idle timeout and reconnect on their own, measured about 30 seconds of interruption.
 
 The URI looks like

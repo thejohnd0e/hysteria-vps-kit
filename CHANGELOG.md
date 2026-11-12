@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5 - 2026-11-12
+- `hy2-client rotate NAME`: changes an identity's password without renaming it (for a compromised URI),
+  with the same backup/rollback guarantees as `add`; prints the new URI.
+- `hy2-client backup [FILE]`: root-only (mode 600) tarball of state, config, TLS key/cert, unit, sysctl
+  file and the core binary; `hy2-client restore FILE` validates the archive, saves the current
+  installation aside, extracts, fixes permissions and finishes through `install.sh --repair`.
+- `hy2-client logs [-n N] [-f] [--since TIME]`: journalctl wrapper scoped to the service.
+- Release tags (`v0.2.4`, `v0.2.5`, ...) for use with `HVK_REF`.
+
 ## 0.2.4 - 2026-11-12
 - Review fixes (local, uncommitted until rollout):
 - `install.sh --repair` now also updates `state.version`, so a repaired installation no longer looks

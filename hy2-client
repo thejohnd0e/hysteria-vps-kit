@@ -13,17 +13,24 @@ Usage: hy2-client <command> [arguments]
 
   add NAME            create an identity (own password) and print its URI
   remove NAME         delete an identity
+  rotate NAME         change the password of an identity and print the new URI
   list                list identities
   show NAME [--yaml [--http ADDR] [--socks ADDR] | --qr]
                       print the hysteria2:// URI (default), a client.yaml for the
                       Hysteria2 client / proxy container, or a QR code
+  backup [FILE]       write a root-only backup archive (state, config, cert/key,
+                      unit, sysctl file and the core binary); default
+                      /root/hysteria-vps-kit-backup-<date>.tgz
+  restore FILE        restore an installation from a backup archive and repair it
+  logs [-n N] [-f] [--since TIME]
+                      show the service journal (journalctl wrapper)
   doctor              read-only diagnostics on configuration, certificates, unit, and service
   version             kit and core versions
   help                this text
 
-Adding or removing an identity restarts the service (Hysteria2 has no hot reload).
-Connected clients notice after the QUIC idle timeout and reconnect on their own:
-measured about 30 seconds of interruption.
+Adding, removing or rotating an identity restarts the service (Hysteria2 has no
+hot reload). Connected clients notice after the QUIC idle timeout and reconnect
+on their own: measured about 30 seconds of interruption.
 EOF
 }
 
@@ -387,6 +394,119 @@ case $cmd in
                 hvk_client_uri "$name" | qrencode -t ANSIUTF8
                 ;;
         esac
+        ;;
+    rotate)
+        hvk_require_root; hvk_require_state
+        hvk_lock
+        name=${1:-}; [[ -n $name ]] || { usage >&2; exit 2; }
+        actual_name=$(jq -r --arg n "$name" '.clients | keys[] | select(. == $n)' "$HVK_STATE" 2>/dev/null || true)
+        [[ -n $actual_name ]] || hvk_die "no such client: $name"
+
+        state_bak=$(mktemp "$HVK_ETC/.state.bak.XXXXXX")
+        config_bak=$(mktemp "$HVK_ETC/.config.bak.XXXXXX")
+        cleanup_rotate() { rm -f "$state_bak" "$config_bak"; }
+        trap cleanup_rotate EXIT
+        cp -pf "$HVK_STATE" "$state_bak"
+        cp -pf "$HVK_CONFIG" "$config_bak"
+
+        rollback_rotate() {
+            trap - EXIT ERR
+            cp -pf "$state_bak" "$HVK_STATE"
+            cp -pf "$config_bak" "$HVK_CONFIG"
+            cleanup_rotate
+            if hvk_restart_service; then
+                hvk_die "failed to rotate password for '$actual_name': service did not start; restored previous configuration"
+            else
+                hvk_die "CRITICAL: failed to rotate password for '$actual_name' and failed to restore service; check logs: journalctl -u $HVK_SERVICE -n 30"
+            fi
+        }
+        trap rollback_rotate ERR
+
+        new_password=$(hvk_rand 28)
+        CLIENT_PASSWORD=$new_password hvk_state_update '.clients[$n] = $ENV.CLIENT_PASSWORD' --arg n "$actual_name" || rollback_rotate
+        hvk_render_config || rollback_rotate
+        if ! hvk_restart_service; then
+            rollback_rotate
+        fi
+        trap - EXIT ERR
+        cleanup_rotate
+        printf 'Rotated password for %s\nURI:\n' "$actual_name"
+        hvk_client_uri "$actual_name"
+        ;;
+    backup)
+        hvk_require_root; hvk_require_state
+        hvk_lock
+        out=${1:-}
+        [[ -z $out ]] && out="${HVK_ROOT:-}/root/hysteria-vps-kit-backup-$(date +%Y%m%d-%H%M%S).tgz"
+        [[ $out == /* ]] || hvk_die "backup path must be absolute: $out"
+        out_dir=$(dirname -- "$out")
+        [[ -d $out_dir ]] || mkdir -p -- "$out_dir"
+        tmp=$(mktemp "$out.part.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT
+        # A coherent bundle for recovery: state, rendered config, TLS pair, unit, sysctl, core.
+        if tar --ignore-failed-read -czf "$tmp" -C "${HVK_ROOT:-/}" \
+            etc/hysteria-vps-kit \
+            etc/systemd/system/hysteria-vps-kit.service \
+            etc/sysctl.d/99-hysteria-vps-kit.conf \
+            opt/hysteria-vps-kit/hysteria; then
+            chmod 600 "$tmp"
+            mv -f "$tmp" "$out"
+            trap - EXIT
+            hvk_log "backup written to $out ($(stat -c %s "$out") bytes, mode 600)"
+        else
+            hvk_die "could not create the backup archive"
+        fi
+        ;;
+    restore)
+        hvk_require_root
+        hvk_lock
+        file=${1:-}; [[ -n $file ]] || { usage >&2; exit 2; }
+        [[ $file == /* ]] || hvk_die "backup path must be absolute: $file"
+        [[ -f $file ]] || hvk_die "no such file: $file"
+        members=$(tar -tzf "$file" 2>/dev/null) || hvk_die "not a gzip tar archive: $file"
+        grep -qx 'etc/hysteria-vps-kit/state.json' <<< "$members" || hvk_die "not a hysteria-vps-kit backup: no etc/hysteria-vps-kit/state.json inside"
+        for need in etc/hysteria-vps-kit/server.key etc/hysteria-vps-kit/server.crt; do
+            grep -qx "$need" <<< "$members" || hvk_log "warning: $need is not in the archive; the certificate pin will change after restore"
+        done
+        # Keep what is being replaced.
+        if [[ -e $HVK_ETC ]]; then
+            pre="${HVK_ROOT:-}/root/hysteria-vps-kit-pre-restore-$(date +%Y%m%d-%H%M%S).tgz"
+            tar --ignore-failed-read -czf "$pre" -C "${HVK_ROOT:-/}" \
+                etc/hysteria-vps-kit etc/systemd/system/hysteria-vps-kit.service \
+                etc/sysctl.d/99-hysteria-vps-kit.conf opt/hysteria-vps-kit/hysteria 2>/dev/null || true
+            chmod 600 "$pre" 2>/dev/null || true
+            hvk_log "current installation saved to $pre"
+        fi
+        tar -xzf "$file" -C "${HVK_ROOT:-/}" || hvk_die "could not extract the backup"
+        chmod 600 "$HVK_STATE"
+        [[ ! -f $HVK_KEY ]] || chmod 640 "$HVK_KEY"
+        [[ ! -f $HVK_CERT ]] || chmod 640 "$HVK_CERT"
+        [[ ! -f $HVK_CONFIG ]] || chmod 640 "$HVK_CONFIG"
+        if [[ -z $HVK_ROOT ]]; then
+            chown "root:$HVK_USER" "$HVK_ETC" "$HVK_KEY" "$HVK_CERT" "$HVK_CONFIG" 2>/dev/null || true
+        fi
+        # Re-validate, re-render, sync the unit and restart through the repair path.
+        if [[ -n $HVK_ROOT ]]; then
+            bash "$project/install.sh" --no-service --root "$HVK_ROOT" --non-interactive --repair
+        else
+            bash "$project/install.sh" --non-interactive --repair
+        fi
+        hvk_log "restored from $file; re-issue client profiles if the certificate pin changed"
+        ;;
+    logs)
+        hvk_require_root
+        [[ -z $HVK_ROOT ]] || hvk_die 'logs requires the real system (not sandbox mode)'
+        jargs=(--no-pager)
+        while (( $# )); do
+            case $1 in
+                -n|--lines) jargs+=(--lines "${2:?--lines needs a value}"); shift 2 ;;
+                -f|--follow) jargs+=(--follow); shift ;;
+                --since) jargs+=(--since "${2:?--since needs a value}"); shift 2 ;;
+                -h|--help) printf 'Usage: hy2-client logs [-n N] [-f] [--since TIME]\n'; exit 0 ;;
+                *) hvk_die "unknown option: $1" ;;
+            esac
+        done
+        exec journalctl -u "$HVK_SERVICE" "${jargs[@]}"
         ;;
     *) usage >&2; exit 2 ;;
 esac
