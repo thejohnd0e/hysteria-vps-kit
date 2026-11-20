@@ -71,6 +71,7 @@ hy2-client show phone         # hysteria2:// URI
 hy2-client show phone --qr    # QR code
 hy2-client show phone --yaml --http 0.0.0.0:9230 --socks 0.0.0.0:8230   # client.yaml for the Hysteria2 client
 hy2-client rotate phone       # new password for an identity (re-issue the URI after it)
+hy2-client endpoint 203.0.113.5  # new server address in URIs after an IP change (no restart)
 hy2-client remove phone
 hy2-client backup             # root-only tarball (state, config, cert/key, unit, sysctl, core)
 hy2-client restore /root/hysteria-vps-kit-backup-....tgz   # extract + repair

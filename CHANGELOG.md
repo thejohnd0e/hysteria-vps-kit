@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- `hy2-client endpoint ADDR`: changes the server address written into URIs and `client.yaml` after the server IP changes (IPv4 or DNS name). Only `state.json` changes (the server config and certificate do not contain the address, clients pin the certificate hash), so no restart is needed.
+
 ## 0.2.5 - 2026-11-12
 - `hy2-client rotate NAME`: changes an identity's password without renaming it (for a compromised URI),
   with the same backup/rollback guarantees as `add`; prints the new URI.

@@ -15,6 +15,8 @@ Usage: hy2-client <command> [arguments]
   remove NAME         delete an identity
   rotate NAME         change the password of an identity and print the new URI
   list                list identities
+  endpoint ADDR       set the server address written into URIs and client.yaml (IPv4 or DNS
+                      name) after the server got a new IP; the service is not restarted
   show NAME [--yaml [--http ADDR] [--socks ADDR] | --qr]
                       print the hysteria2:// URI (default), a client.yaml for the
                       Hysteria2 client / proxy container, or a QR code
@@ -371,6 +373,20 @@ case $cmd in
         if [[ $(jq -r '.clients | length' "$HVK_STATE") == 0 ]]; then
             hvk_log "no identities left: the service is stopped (Hysteria2 cannot run without one); 'hy2-client add NAME' starts it again"
         fi
+        ;;
+    endpoint)
+        hvk_require_root; hvk_require_state
+        hvk_lock
+        new_endpoint=${1:-}; [[ -n $new_endpoint && $# -eq 1 ]] || { usage >&2; exit 2; }
+        if [[ $new_endpoint == YOUR_SERVER_IP ]] || ! hvk_valid_endpoint "$new_endpoint"; then
+            hvk_die "invalid endpoint (IPv4 address or DNS name): $new_endpoint"
+        fi
+        [[ $(hvk_state_get .endpoint) != "$new_endpoint" ]] || hvk_die "endpoint is already set to $new_endpoint"
+        # The server config and certificate do not contain the address (clients pin the
+        # certificate hash), so only state.json changes and no restart is needed.
+        hvk_state_update '.endpoint = $e' --arg e "$new_endpoint"
+        printf 'Endpoint set to %s. Re-issue client URIs with: hy2-client show NAME
+' "$new_endpoint"
         ;;
     show)
         hvk_require_state

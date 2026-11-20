@@ -265,6 +265,21 @@ suite_stagec() {
     local rendered=$sandbox/rendered.yaml
     check 'config matches state after rotate' bash -c "HVK_ROOT='$sandbox' bash -c \"source '$project/lib/common.sh' && hvk_render_config_to '$rendered'\" && cmp -s '$rendered' '$E/config.yaml'"
 
+    # endpoint change (new server IP): only the address in URIs moves
+    local cfg_before
+    cfg_before=$(sha256sum < "$E/config.yaml")
+    refuse 'endpoint refuses the placeholder' hy endpoint YOUR_SERVER_IP
+    refuse 'endpoint refuses an invalid address' hy endpoint 'not an address!'
+    refuse 'endpoint needs an argument' hy endpoint
+    hy endpoint 203.0.113.77 > /dev/null
+    check 'endpoint is recorded in the state' test "$(jq -r .endpoint "$E/state.json")" = 203.0.113.77
+    check 'endpoint change leaves the server config byte-identical' test "$cfg_before" = "$(sha256sum < "$E/config.yaml")"
+    check 'show prints the new address' bash -c "HVK_ROOT='$sandbox' '$project/hy2-client' show alice | grep -q '@203.0.113.77:'"
+    refuse 'the same endpoint twice is refused' hy endpoint 203.0.113.77
+    hy endpoint vpn.example.net > /dev/null
+    check 'a DNS endpoint is accepted' test "$(jq -r .endpoint "$E/state.json")" = vpn.example.net
+    check 'client keeps its password after an endpoint change' test "$(jq -r .clients.alice "$E/state.json")" = "$pw_after"
+
     # failed rotate rolls back (mock jq failing on to_entries, as in the render suite)
     mkdir -p "$sandbox/mockbin"
     cat > "$sandbox/mockbin/jq" <<'EOF'
